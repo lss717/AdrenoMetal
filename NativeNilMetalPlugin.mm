@@ -10,13 +10,13 @@
 // driver, so we can see whether the compositor falls back and presents a first
 // frame.
 //
-// H185/H186: the H184 run crashed backboardd with SIGSEGV while this bundle was
-// reachable through the bindfs union, but stderr of a launchd job goes to
-// /dev/null, so the traces never reached the boot log.  Write to /dev/console
-// instead: this separates "the image never loaded" (no ctor line) from "the
-// device request crashed" (ctor printed, init missing).
+// H185-H187 could not prove whether the bundle image ever executed: launchd
+// sends a job's stderr to /dev/null and user-space /dev/console writes do not
+// reach the kernel console on this port.  H188 uses the exit status as the
+// channel: the constructor exits the loading process with code 42, which the
+// kernel logs as "NATIVE_EXIT ... status=0x2a".  A SIGSEGV with no such exit
+// means the image never ran (dyld/mmap/AMFI stage); status 0x2a means it did.
 #import <Foundation/Foundation.h>
-#include <stdio.h>
 #include <unistd.h>
 
 // The real _MTLDevice lives in Metal.framework and is already loaded in the
@@ -28,27 +28,13 @@
 - (id)initWithAcceleratorPort:(unsigned)port;
 @end
 
-static void nilmetal_log(const char *format, ...) {
-    FILE *console = fopen("/dev/console", "w");
-    if (console == NULL) {
-        return;
-    }
-    va_list arguments;
-    va_start(arguments, format);
-    fprintf(console, "NILMETAL: ");
-    vfprintf(console, format, arguments);
-    fprintf(console, "\n");
-    va_end(arguments);
-    fclose(console);
-}
-
 __attribute__((constructor)) static void nilmetal_constructor(void) {
-    nilmetal_log("ctor pid=%d", (int)getpid());
+    _exit(42);
 }
 
 @implementation NativeNilMetalDevice
 - (id)initWithAcceleratorPort:(unsigned)port {
-    nilmetal_log("init port=%u self=%p", port, self);
+    (void)port;
     [self release];
     return nil;
 }

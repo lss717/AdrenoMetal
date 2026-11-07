@@ -10,10 +10,11 @@
 // driver, so we can see whether the compositor falls back and presents a first
 // frame.
 //
-// H185: the H184 run crashed backboardd with SIGSEGV right after CoreAnimation
-// read MetalPluginClassName while this bundle was reachable through the bindfs
-// union.  These stderr traces separate "the image never loaded" (no ctor) from
-// "the device request crashed" (ctor printed, init missing) in the boot log.
+// H185/H186: the H184 run crashed backboardd with SIGSEGV while this bundle was
+// reachable through the bindfs union, but stderr of a launchd job goes to
+// /dev/null, so the traces never reached the boot log.  Write to /dev/console
+// instead: this separates "the image never loaded" (no ctor line) from "the
+// device request crashed" (ctor printed, init missing).
 #import <Foundation/Foundation.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -27,13 +28,27 @@
 - (id)initWithAcceleratorPort:(unsigned)port;
 @end
 
+static void nilmetal_log(const char *format, ...) {
+    FILE *console = fopen("/dev/console", "w");
+    if (console == NULL) {
+        return;
+    }
+    va_list arguments;
+    va_start(arguments, format);
+    fprintf(console, "NILMETAL: ");
+    vfprintf(console, format, arguments);
+    fprintf(console, "\n");
+    va_end(arguments);
+    fclose(console);
+}
+
 __attribute__((constructor)) static void nilmetal_constructor(void) {
-    fprintf(stderr, "NILMETAL: ctor pid=%d\n", (int)getpid());
+    nilmetal_log("ctor pid=%d", (int)getpid());
 }
 
 @implementation NativeNilMetalDevice
 - (id)initWithAcceleratorPort:(unsigned)port {
-    fprintf(stderr, "NILMETAL: init port=%u self=%p\n", port, self);
+    nilmetal_log("init port=%u self=%p", port, self);
     [self release];
     return nil;
 }

@@ -9,7 +9,14 @@
 // software renderer running; this bundle does exactly that without any GPU
 // driver, so we can see whether the compositor falls back and presents a first
 // frame.
+//
+// H185: the H184 run crashed backboardd with SIGSEGV right after CoreAnimation
+// read MetalPluginClassName while this bundle was reachable through the bindfs
+// union.  These stderr traces separate "the image never loaded" (no ctor) from
+// "the device request crashed" (ctor printed, init missing) in the boot log.
 #import <Foundation/Foundation.h>
+#include <stdio.h>
+#include <unistd.h>
 
 // The real _MTLDevice lives in Metal.framework and is already loaded in the
 // process that loads this bundle; only the name is needed here.
@@ -20,9 +27,13 @@
 - (id)initWithAcceleratorPort:(unsigned)port;
 @end
 
+__attribute__((constructor)) static void nilmetal_constructor(void) {
+    fprintf(stderr, "NILMETAL: ctor pid=%d\n", (int)getpid());
+}
+
 @implementation NativeNilMetalDevice
 - (id)initWithAcceleratorPort:(unsigned)port {
-    (void)port;
+    fprintf(stderr, "NILMETAL: init port=%u self=%p\n", port, self);
     [self release];
     return nil;
 }

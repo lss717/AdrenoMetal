@@ -10,12 +10,12 @@
 // driver, so we can see whether the compositor falls back and presents a first
 // frame.
 //
-// H185-H187 could not prove whether the bundle image ever executed: launchd
-// sends a job's stderr to /dev/null and user-space /dev/console writes do not
-// reach the kernel console on this port.  H188 uses the exit status as the
-// channel: the constructor exits the loading process with code 42, which the
-// kernel logs as "NATIVE_EXIT ... status=0x2a".  A SIGSEGV with no such exit
-// means the image never ran (dyld/mmap/AMFI stage); status 0x2a means it did.
+// H188 proved with _exit(42) in the constructor that the image loads through
+// the union and its code runs.  H189 moves the marker into the device request:
+// initWithAcceleratorPort: exits with 43.  "status=0x2b00" in the boot log means
+// the class check and messenger call succeeded and the H184-H186 SIGSEGV happens
+// after this method returns nil; a SIGSEGV without it means the crash is in the
+// principalClass/isSubclassOfClass stage before the method.
 #import <Foundation/Foundation.h>
 #include <unistd.h>
 
@@ -29,13 +29,12 @@
 @end
 
 __attribute__((constructor)) static void nilmetal_constructor(void) {
-    _exit(42);
 }
 
 @implementation NativeNilMetalDevice
 - (id)initWithAcceleratorPort:(unsigned)port {
     (void)port;
-    [self release];
+    _exit(43);
     return nil;
 }
 @end

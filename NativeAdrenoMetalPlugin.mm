@@ -370,8 +370,11 @@ static id deviceForPort(unsigned port) {
 
 @implementation NativeAdrenoMetalDevice
 - (id)initWithAcceleratorPort:(unsigned)port {
-    self = [super init];
-    if (!self || !port) return nil;
+    // H193: _MTLDevice's -init is not an NSObject init. On the target it returns nil for a plugin-owned
+    // instance, so the userspace test thread never started (H192: the bundle was mapped, MetalPluginClassName
+    // was read, and no user-client open followed). This object only carries the call and is never used as a
+    // device, so the test path does not run the superclass init.
+    if (!port) return nil;
     if (publish::requested()) return publish::deviceForPort(port);
     static bool attempted;
     if (attempted) return nil;

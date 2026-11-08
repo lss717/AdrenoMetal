@@ -25,6 +25,8 @@ extern "C" {
 namespace {
 using IOServiceOpenFn = int (*)(unsigned, unsigned, uint32_t, unsigned *);
 using IOServiceCloseFn = int (*)(unsigned);
+using MatchingFn = void *(*)(const char *);
+using GetServiceFn = unsigned (*)(unsigned, void *);
 using CallFn = int (*)(unsigned, uint32_t, const void *, size_t, void *, size_t *);
 using MapFn = int (*)(unsigned, uint32_t, unsigned, uint64_t *, uint64_t *, uint32_t);
 using UnmapFn = int (*)(unsigned, uint32_t, unsigned, uint64_t);
@@ -587,8 +589,24 @@ static int adrenoUserTest(unsigned port, const char *process) {
     gpu.mark(1);
     if (!open || !close || !gpu.call || !gpu.map || !gpu.unmap) return -1;
     gpu.mark(2);
+    // H202: the port CoreAnimation hands to initWithAcceleratorPort: is released around this call and the
+    // service is republished, so prefer a fresh lookup and retry the connection once with it.
+    auto matching = (MatchingFn)dlsym(iokit, "IOServiceMatching");
+    auto getService = (GetServiceFn)dlsym(iokit, "IOServiceGetMatchingService");
+    if (matching && getService) {
+        const unsigned own = getService(0, matching("IOAcceleratorES"));
+        if (own) { port = own; gpu.port = own; }
+    }
     // 0x4147 ('AG') is the open type the driver serves; the original IOGPU library's type-1 opens are refused.
-    const int openResult = open(port, mach_task_self(), 0x4147, &gpu.conn);
+    int openResult = open(port, mach_task_self(), 0x4147, &gpu.conn);
+    if ((openResult != 0 || !gpu.conn) && matching && getService) {
+        const unsigned own = getService(0, matching("IOAcceleratorES"));
+        if (own && own != port) {
+            port = own;
+            gpu.port = own;
+            openResult = open(port, mach_task_self(), 0x4147, &gpu.conn);
+        }
+    }
     if (openResult != 0 || !gpu.conn) {
         // The exact kern_return_t, as two markers (high and low half), after the failure marker.
         gpu.mark(0x4f01);

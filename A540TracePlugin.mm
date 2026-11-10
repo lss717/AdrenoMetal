@@ -94,41 +94,8 @@ static bool connectAccelerator(void)
     return false;
 }
 
-@interface A540TraceDevice : NSObject
+@interface A540TraceDevice : _MTLDevice
 @end
-
-/** H236gq: the registration Metal performs for a plugin device asserts that
- *  the class conforms to MTLDeviceSPI as well as MTLDevice (the target's own
- *  drivers get it from their IOGPU base).  That assertion is what aborted
- *  backboardd when a statically compiled _MTLDevice subclass was returned.
- *  The working published device builds its class at run time on _MTLDevice with
- *  both protocols added, so the trace does the same and copies the logging
- *  methods of the statically compiled class onto it. */
-static Class trace_device_class(void)
-{
-    static Class cls;
-    static bool tried;
-    if (tried) return cls;
-    tried = true;
-    Class base = objc_getClass("_MTLDevice");
-    if (!base) return Nil;
-    // The target's base class ABI (iPadOS 17.7.11) adds no instance variables to
-    // the 536-byte _MTLDevice, which is what the published device checks too.
-    if (class_getInstanceSize(base) != 536) return Nil;
-    Class derived = objc_allocateClassPair(base, "A540TraceRuntimeDevice", 0);
-    if (!derived) return Nil;
-    unsigned count = 0;
-    Method *methods = class_copyMethodList([A540TraceDevice class], &count);
-    for (unsigned index = 0; index < count; ++index)
-        class_addMethod(derived, method_getName(methods[index]),
-                        method_getImplementation(methods[index]), method_getTypeEncoding(methods[index]));
-    free(methods);
-    class_addProtocol(derived, @protocol(MTLDevice));
-    if (Protocol *spi = objc_getProtocol("MTLDeviceSPI")) class_addProtocol(derived, spi);
-    objc_registerClassPair(derived);
-    cls = derived;
-    return cls;
-}
 
 @implementation A540TraceDevice
 
@@ -137,6 +104,12 @@ static Class trace_device_class(void)
 + (void)load
 {
     gLoaded = true;
+    // H236gs: Metal's device registration asserts that the plugin's device
+    // conforms to MTLDevice and to the private MTLDeviceSPI.  The target's own
+    // drivers inherit that from their IOGPU base; a plugin class has to declare
+    // it, and without it the assertion aborts the hosting process (gl).
+    class_addProtocol(self, @protocol(MTLDevice));
+    if (Protocol *spi = objc_getProtocol("MTLDeviceSPI")) class_addProtocol(self, spi);
 }
 
 + (void)initialize
@@ -179,14 +152,11 @@ static Class trace_device_class(void)
     // it); the plugin builds the device.  H236gq: the class must be a registered
     // _MTLDevice subclass that conforms to MTLDevice and MTLDeviceSPI, which is
     // what trace_device_class() builds.
-    Class cls = trace_device_class();
-    if (!cls) {
-        caller("dev", "initWithAcceleratorPort:", "no-class");
-        return nil;
-    }
-    id device = [cls new];
-    caller("dev", "initWithAcceleratorPort:", device ? "device=created" : "device=nil");
-    return device;
+    // H236gm showed that handing this instance back aborts Metal's registration;
+    // H236gs adds the MTLDeviceSPI conformance the assertion asks for, so the
+    // instance is offered again and the inventory follows if it is accepted.
+    caller("dev", "initWithAcceleratorPort:", "device=returned");
+    return self;
 }
 
 - (NSString *)name { caller("dev", "name", ""); return @"A540Trace"; }

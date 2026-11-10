@@ -23,12 +23,6 @@
 @end
 @interface NativeAdrenoMetalDeviceBase : NSObject   // only a lock object for the published mode's one-time setup
 @end
-@implementation NativeAdrenoMetalDeviceBase
-@end
-@interface NativeAdrenoMetalDevice : _MTLDevice
-- (id)initWithAcceleratorPort:(unsigned)port;
-@end
-
 // ---- published mode ----
 namespace publish {
 // The image's marker: a file beside the bundle in the union view of /System/Library/Extensions (the bundle's own seal stays untouched).
@@ -368,6 +362,95 @@ static id deviceForPort(unsigned port) {
 }
 }  // namespace publish
 
+// ---- H236fu: A1 tracing device -------------------------------------------------
+// Selected by the NativeAdrenoMetal.trace marker beside the bundle. It answers
+// CoreAnimation's Metal SPI with logged, inert values so the exact inventory of
+// what the renderer asks for (order, arguments, and the call it abandons on)
+// reaches the kernel log through the native Adreno ABI's Log method (17).
+namespace trace {
+static Gpu *g_gpu;
+static unsigned g_seq;
+static unsigned g_budget = 600;
+static bool requested() {
+    char path[1024];
+    return publish::requestedPath("NativeAdrenoMetal.trace", path, sizeof path);
+}
+static void line(const char *text) {
+    if (!g_gpu || !g_budget) return;
+    --g_budget;
+    NativeAdrenoAbiLog record = {};
+    size_t n = strlen(text);
+    if (n > NativeAdrenoAbiLogBytes) n = NativeAdrenoAbiLogBytes;
+    memcpy(record.text, text, n);
+    record.bytes = (uint32_t)n;
+    g_gpu->method(NativeAdrenoMethodLog, &record, sizeof record, nullptr, 0);
+}
+static void call(const char *cls, const char *sel, const char *detail) {
+    char text[192];
+    snprintf(text, sizeof text, "MTL#%u %s %s %s", ++g_seq, cls, sel, detail ? detail : "");
+    line(text);
+}
+static void scalar(const char *cls, const char *sel, const char *name, unsigned long long value) {
+    char detail[64];
+    snprintf(detail, sizeof detail, "%s=%llu", name, value);
+    call(cls, sel, detail);
+}
+}
+@interface A540TraceDevice : _MTLDevice
++ (instancetype)traceDevice;
+@end
+@implementation A540TraceDevice
++ (instancetype)traceDevice { return [A540TraceDevice alloc]; }
+- (NSString *)name { trace::call("dev", "name", ""); return @"NativeA540"; }
+- (uint64_t)registryID { trace::call("dev", "registryID", "0x540"); return 0x540; }
+- (unsigned long long)maxBufferLength { trace::call("dev", "maxBufferLength", "268435456"); return 256ull << 20; }
+- (BOOL)isHeadless { trace::call("dev", "isHeadless", "0"); return NO; }
+- (BOOL)isLowPower { trace::call("dev", "isLowPower", "0"); return NO; }
+- (BOOL)isRemovable { trace::call("dev", "isRemovable", "0"); return NO; }
+- (BOOL)isDepth24Stencil8PixelFormatSupported { trace::call("dev", "depth24", "1"); return YES; }
+- (BOOL)supportsFeatureSet:(unsigned long long)featureSet { trace::scalar("dev", "supportsFeatureSet:", "fs", featureSet); return YES; }
+- (BOOL)supportsFamily:(long long)family { trace::scalar("dev", "supportsFamily:", "family", (unsigned long long)family); return YES; }
+- (unsigned long long)recommendedMaxWorkingSetSize { trace::call("dev", "recommendedMaxWorkingSetSize", "0"); return 0; }
+- (unsigned long long)currentAllocatedSize { trace::call("dev", "currentAllocatedSize", "0"); return 0; }
+- (id)newCommandQueue { trace::call("dev", "newCommandQueue", ""); return nil; }
+- (id)newCommandQueueWithMaxCommandBufferCount:(unsigned long long)count {
+    trace::scalar("dev", "newCommandQueueWithMaxCommandBufferCount:", "count", count);
+    return nil;
+}
+- (id)newBufferWithLength:(unsigned long long)length options:(unsigned long long)options {
+    char detail[64];
+    snprintf(detail, sizeof detail, "length=%llu options=%llu", length, options);
+    trace::call("dev", "newBufferWithLength:options:", detail);
+    return nil;
+}
+- (id)newTextureWithDescriptor:(id)descriptor {
+    trace::call("dev", "newTextureWithDescriptor:", descriptor ? "descriptor=1" : "descriptor=0");
+    return nil;
+}
+- (id)newRenderPipelineStateWithDescriptor:(id)descriptor error:(id *)error {
+    trace::call("dev", "newRenderPipelineStateWithDescriptor:error:", descriptor ? "descriptor=1" : "descriptor=0");
+    return nil;
+}
+- (id)newDepthStencilStateWithDescriptor:(id)descriptor {
+    trace::call("dev", "newDepthStencilStateWithDescriptor:", descriptor ? "descriptor=1" : "descriptor=0");
+    return nil;
+}
+- (id)newSamplerStateWithDescriptor:(id)descriptor {
+    trace::call("dev", "newSamplerStateWithDescriptor:", descriptor ? "descriptor=1" : "descriptor=0");
+    return nil;
+}
+- (id)newDefaultLibrary { trace::call("dev", "newDefaultLibrary", ""); return nil; }
+- (id)newFence { trace::call("dev", "newFence", ""); return nil; }
+- (id)newEvent { trace::call("dev", "newEvent", ""); return nil; }
+- (void)dealloc { trace::call("dev", "dealloc", ""); }
+@end
+
+@implementation NativeAdrenoMetalDeviceBase
+@end
+@interface NativeAdrenoMetalDevice : _MTLDevice
+- (id)initWithAcceleratorPort:(unsigned)port;
+@end
+
 @implementation NativeAdrenoMetalDevice
 - (id)initWithAcceleratorPort:(unsigned)port {
     // H193: _MTLDevice's -init is not an NSObject init. On the target it returns nil for a plugin-owned
@@ -375,6 +458,11 @@ static id deviceForPort(unsigned port) {
     // was read, and no user-client open followed). This object only carries the call and is never used as a
     // device, so the test path does not run the superclass init.
     if (!port) return nil;
+    if (trace::requested()) {
+        trace::g_gpu = publish::makeGpu(port);
+        trace::call("dev", "initWithAcceleratorPort:", "");
+        return (id)[A540TraceDevice traceDevice];
+    }
     if (publish::requested()) return publish::deviceForPort(port);
     static bool attempted;
     if (attempted) return nil;

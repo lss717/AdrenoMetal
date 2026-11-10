@@ -18,6 +18,7 @@
 //  * a device that never answers leaves Metal retrying, which is exactly the
 //    abandon point the inventory below has to capture.
 #import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
 #import <objc/runtime.h>
 #include <IOKit/IOKitLib.h>
 #include <stdint.h>
@@ -25,6 +26,9 @@
 #include <string.h>
 
 @interface _MTLDevice : NSObject
+// The selector Metal sends to the principal class: declaring it lets the plugin
+// ask the real class what it does with the accelerator port (H236gn).
+- (instancetype)initWithAcceleratorPort:(unsigned)port;
 @end
 
 static const uint32_t kTunnelMagic = 0x4e544e4c;   /* 'NTNL' */
@@ -90,8 +94,41 @@ static bool connectAccelerator(void)
     return false;
 }
 
-@interface A540TraceDevice : _MTLDevice
+@interface A540TraceDevice : NSObject
 @end
+
+/** H236gq: the registration Metal performs for a plugin device asserts that
+ *  the class conforms to MTLDeviceSPI as well as MTLDevice (the target's own
+ *  drivers get it from their IOGPU base).  That assertion is what aborted
+ *  backboardd when a statically compiled _MTLDevice subclass was returned.
+ *  The working published device builds its class at run time on _MTLDevice with
+ *  both protocols added, so the trace does the same and copies the logging
+ *  methods of the statically compiled class onto it. */
+static Class trace_device_class(void)
+{
+    static Class cls;
+    static bool tried;
+    if (tried) return cls;
+    tried = true;
+    Class base = objc_getClass("_MTLDevice");
+    if (!base) return Nil;
+    // The target's base class ABI (iPadOS 17.7.11) adds no instance variables to
+    // the 536-byte _MTLDevice, which is what the published device checks too.
+    if (class_getInstanceSize(base) != 536) return Nil;
+    Class derived = objc_allocateClassPair(base, "A540TraceRuntimeDevice", 0);
+    if (!derived) return Nil;
+    unsigned count = 0;
+    Method *methods = class_copyMethodList([A540TraceDevice class], &count);
+    for (unsigned index = 0; index < count; ++index)
+        class_addMethod(derived, method_getName(methods[index]),
+                        method_getImplementation(methods[index]), method_getTypeEncoding(methods[index]));
+    free(methods);
+    class_addProtocol(derived, @protocol(MTLDevice));
+    if (Protocol *spi = objc_getProtocol("MTLDeviceSPI")) class_addProtocol(derived, spi);
+    objc_registerClassPair(derived);
+    cls = derived;
+    return cls;
+}
 
 @implementation A540TraceDevice
 
@@ -108,12 +145,10 @@ static bool connectAccelerator(void)
     caller("dev", "initialize", gLoaded ? "loaded=1" : "loaded=0");
 }
 
-/** Metal allocates the principal class itself; allocate the instance directly
- *  so _MTLDevice's own +alloc is not part of the path. */
 + (id)alloc
 {
     caller("cls", "alloc", "");
-    return class_createInstance(self, 0);
+    return [super alloc];
 }
 
 /** Report instead of aborting: the message Metal sends when it gives up is the
@@ -136,16 +171,22 @@ static bool connectAccelerator(void)
 
 - (instancetype)initWithAcceleratorPort:(unsigned)port
 {
-    char detail[48];
+    char detail[64];
     snprintf(detail, sizeof detail, "port=0x%x", port);
     caller("dev", "initWithAcceleratorPort:", detail);
     if (!connectAccelerator()) caller("dev", "initWithAcceleratorPort:", "no-tunnel");
-    // H236gm: returning this instance kills backboardd right after this method
-    // (~50 ms, SIGABRT, 15 corpses): _MTLDevice keeps internal state that a
-    // directly allocated stub never initializes, so Metal cannot adopt it. The
-    // original plugin returns nil here for the same reason and keeps the system
-    // alive; the abandon point is exactly this, and it is reported above.
-    return nil;
+    // H236go: _MTLDevice has no -initWithAcceleratorPort: of its own (gn proved
+    // it); the plugin builds the device.  H236gq: the class must be a registered
+    // _MTLDevice subclass that conforms to MTLDevice and MTLDeviceSPI, which is
+    // what trace_device_class() builds.
+    Class cls = trace_device_class();
+    if (!cls) {
+        caller("dev", "initWithAcceleratorPort:", "no-class");
+        return nil;
+    }
+    id device = [cls new];
+    caller("dev", "initWithAcceleratorPort:", device ? "device=created" : "device=nil");
+    return device;
 }
 
 - (NSString *)name { caller("dev", "name", ""); return @"A540Trace"; }

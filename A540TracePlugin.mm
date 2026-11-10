@@ -1,13 +1,24 @@
 // SPDX-License-Identifier: MIT
-// A540 standalone Metal trace plugin (H236ga).
+// A540 standalone Metal trace plugin (H236gm).
 //
-// A deliberately dependency-free bundle: it links only Foundation and IOKit, so
-// a load failure can only mean "the bundle was not accepted", never a missing
-// bridge/Turnip artefact. Metal loads it through MetalPluginName=A540Trace and
-// instantiates the principal class; the device answers the render server's SPI
-// with inert values and reports every call through the native Adreno ABI's Log
-// method, which the kernel prints as "NATIVE_MTL: ...".
+// A deliberately dependency-free bundle: it links only Foundation, IOKit and
+// Metal, so a load failure can only mean "the bundle was not accepted", never a
+// missing bridge/Turnip artefact. Metal loads it through MetalPluginName=A540Trace
+// and drives the principal class through the original discovery path
+// (IOAcceleratorES -> MetalPluginName -> NSBundle -> principal class). Every
+// message Metal sends is reported through the native Adreno ABI's Log method,
+// which the kernel prints as "NATIVE_MTL: ...".
+//
+// History that shaped the code (see build-environment-2026-11-10.md §45):
+//  * an ad-hoc bundle is refused for backboardd ("unsuitable CT policy 0" and
+//    "Library Validation failed") unless its CDHash is in the boot trust cache;
+//  * the accelerator port Metal passes to -initWithAcceleratorPort: is not the
+//    connection the ABI answers on, and using it kills the calling process, so
+//    the trace opens its own connection through IOServiceOpen;
+//  * a device that never answers leaves Metal retrying, which is exactly the
+//    abandon point the inventory below has to capture.
 #import <Foundation/Foundation.h>
+#import <objc/runtime.h>
 #include <IOKit/IOKitLib.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -24,9 +35,13 @@ static io_connect_t gConnection;
 static uint32_t gSelector;
 static unsigned gSequence;
 static unsigned gBudget = 800;
+static bool gLoaded;
+
+static bool connectAccelerator(void);
 
 static void emit(const char *text)
 {
+    if (!gConnection && !connectAccelerator()) return;
     if (!gConnection || !gBudget) return;
     --gBudget;
     struct { uint32_t magic, method, bytes, reserved; char text[kMaxLog]; } request;
@@ -80,22 +95,57 @@ static bool connectAccelerator(void)
 
 @implementation A540TraceDevice
 
+/** Runs when the image is loaded: the only proof that the bundle was accepted.
+ *  It must not call the ABI (+load did, and backboardd aborted each time). */
++ (void)load
+{
+    gLoaded = true;
+}
+
++ (void)initialize
+{
+    if (self != [A540TraceDevice class]) return;
+    caller("dev", "initialize", gLoaded ? "loaded=1" : "loaded=0");
+}
+
+/** Metal allocates the principal class itself; allocate the instance directly
+ *  so _MTLDevice's own +alloc is not part of the path. */
++ (id)alloc
+{
+    caller("cls", "alloc", "");
+    return class_createInstance(self, 0);
+}
+
+/** Report instead of aborting: the message Metal sends when it gives up is the
+ *  most valuable line of the whole inventory. */
+- (void)doesNotRecognizeSelector:(SEL)selector
+{
+    caller("dev", "doesNotRecognize:", sel_getName(selector));
+}
+
++ (void)doesNotRecognizeSelector:(SEL)selector
+{
+    caller("cls", "doesNotRecognize:", sel_getName(selector));
+}
+
+- (instancetype)init
+{
+    caller("dev", "init", "");
+    return self;
+}
+
 - (instancetype)initWithAcceleratorPort:(unsigned)port
 {
-    // H236gb: Metal hands over the accelerator connection it already opened.
-    // Opening a second one is refused by the platform sandbox, so the trace
-    // must travel on the provided connection.
-    if (port) gConnection = (io_connect_t) port;
-    if (gConnection) {
-        uint32_t probe[2] = { kTunnelMagic, 0xffffffffu };
-        for (uint32_t selector = 0; selector < 256 && !gSelector; ++selector)
-            if (IOConnectCallStructMethod(gConnection, selector, probe, sizeof probe, NULL, NULL) == KERN_SUCCESS)
-                gSelector = selector;
-    } else {
-        connectAccelerator();
-    }
-    caller("dev", "initWithAcceleratorPort:", gSelector ? "tunnel=ok" : "tunnel=none");
-    return self;
+    char detail[48];
+    snprintf(detail, sizeof detail, "port=0x%x", port);
+    caller("dev", "initWithAcceleratorPort:", detail);
+    if (!connectAccelerator()) caller("dev", "initWithAcceleratorPort:", "no-tunnel");
+    // H236gm: returning this instance kills backboardd right after this method
+    // (~50 ms, SIGABRT, 15 corpses): _MTLDevice keeps internal state that a
+    // directly allocated stub never initializes, so Metal cannot adopt it. The
+    // original plugin returns nil here for the same reason and keeps the system
+    // alive; the abandon point is exactly this, and it is reported above.
+    return nil;
 }
 
 - (NSString *)name { caller("dev", "name", ""); return @"A540Trace"; }
@@ -168,5 +218,6 @@ static bool connectAccelerator(void)
 - (id)newDefaultLibrary { caller("dev", "newDefaultLibrary", ""); return nil; }
 - (id)newFence { caller("dev", "newFence", ""); return nil; }
 - (id)newEvent { caller("dev", "newEvent", ""); return nil; }
+- (void)dealloc { caller("dev", "dealloc", ""); }
 
 @end

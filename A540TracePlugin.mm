@@ -20,6 +20,7 @@
 #define _XOPEN_SOURCE 700   /* ucontext.h: the crash reporter reads pc/lr/sp/fp */
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import <objc/runtime.h>
 #include <IOKit/IOKitLib.h>
 #include <stdint.h>
@@ -150,9 +151,22 @@ static void probe_displays(const char *why)
             NSString *deviceName = nil;
             if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(item, @selector(respondsToSelector:), @selector(deviceName)))
                 deviceName = ((id (*)(id, SEL)) objc_msgSend)(item, @selector(deviceName));
-            snprintf(detail, sizeof detail, "list[%llu] name=%s device=%s",
+            NSString *boundsText = nil;
+            if ([item respondsToSelector:NSSelectorFromString(@"valueForKey:")]) {
+                @try {
+                    NSValue *bounds = [item valueForKey:@"bounds"];
+                    if ([bounds isKindOfClass:[NSValue class]]) {
+                        CGRect rect;
+                        memset(&rect, 0, sizeof rect);
+                        [bounds getValue:&rect];
+                        boundsText = [NSString stringWithFormat:@"%.0fx%.0f", rect.size.width, rect.size.height];
+                    }
+                } @catch (id ignored) { boundsText = nil; }
+            }
+            snprintf(detail, sizeof detail, "list[%llu] name=%s device=%s bounds=%s",
                      index, displayName ? [displayName UTF8String] : "nil",
-                     deviceName ? [deviceName UTF8String] : "nil");
+                     deviceName ? [deviceName UTF8String] : "nil",
+                     boundsText ? [boundsText UTF8String] : "?");
             caller("ca", "display", detail);
         }
     }
@@ -165,27 +179,38 @@ static void probe_displays(const char *why)
  * list is cached, restarting SpringBoard now that the server publishes six
  * displays is the cheapest possible test: a relaunched SpringBoard either gets a
  * display and starts submitting layers, or it does not. */
+/* H236hv: proc_listpids is refused by backboardd's sandbox
+ * ("deny(1) process-info-listpids"), so the list is asked one pid at a time
+ * instead: proc_name() is a different check and may be admitted.  Both counts
+ * are reported, so a refusal is visible rather than silent. */
+static int gScanRefused;
+
 static int find_process(const char *name)
 {
-    const int capacity = 512;
-    pid_t pids[capacity];
-    const int bytes = proc_listpids(A540_PROC_ALL_PIDS, 0, pids, (int) sizeof pids);
-    if (bytes <= 0) return 0;
-    const int count = bytes / (int) sizeof(pid_t);
-    for (int index = 0; index < count; ++index) {
-        if (pids[index] <= 0) continue;
+    gScanRefused = 0;
+    int found = 0;
+    for (int pid = 1; pid <= 400 && !found; ++pid) {
         char comm[64];
         memset(comm, 0, sizeof comm);
-        if (proc_name(pids[index], comm, (uint32_t) sizeof comm) > 0 && !strcmp(comm, name)) return pids[index];
+        const int got = proc_name(pid, comm, (uint32_t) sizeof comm);
+        if (got <= 0) {
+            if (got < 0 && gScanRefused < 1000) ++gScanRefused;
+            continue;
+        }
+        if (!strcmp(comm, name)) found = pid;
     }
-    return 0;
+    return found;
 }
 
 static void restart_springboard(const char *why)
 {
     const int pid = find_process("SpringBoard");
-    char detail[96];
-    if (pid <= 0) { snprintf(detail, sizeof detail, "%s springboard=none", why); caller("ca", "restart", detail); return; }
+    char detail[128];
+    if (pid <= 0) {
+        snprintf(detail, sizeof detail, "%s springboard=none refused=%d", why, gScanRefused);
+        caller("ca", "restart", detail);
+        return;
+    }
     const int status = kill(pid, SIGTERM);
     snprintf(detail, sizeof detail, "%s pid=%d kill=%d", why, pid, status);
     caller("ca", "restart", detail);

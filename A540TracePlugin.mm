@@ -546,7 +546,7 @@ static int find_process(const char *name)
  * sandbox), so the restart goes through the frameworks it already talks to: FrontBoardServices
  * owns application termination, RunningBoardServices the same in its newer form.  Both are
  * private, so they are loaded by name and every call is guarded and logged. */
-static void restart_springboard(const char *why)
+static void __attribute__((unused)) restart_springboard(const char *why)
 {
     char detail[160];
     const int pid = find_process("SpringBoard");
@@ -603,7 +603,9 @@ static void schedule_display_probes(void)
     });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (60.0 * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         probe_gestalt_cache();
-        restart_springboard("restart");
+        /* H247: the forced restart resets SpringBoard's own startup at ~237 s and
+         * makes the natural boot sequence unobservable.  Disabled for this round. */
+        caller("ca", "restart", "skipped-h247");
         for (double delay = 12.0; delay <= 60.0; delay += 16.0) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                 probe_displays("after");

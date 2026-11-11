@@ -214,6 +214,18 @@ static bool connectAccelerator(void)
     return self;
 }
 
+/** H236gz: _MTLAddDevice runs these four on every device it registers.  The
+ *  target's implementations fill the base class's limits and feature tables
+ *  from a hardware profile (featureProfile and the Apple GPU tables); with the
+ *  base implementations left in place and no profile, the very next query
+ *  (supportsFamily:) dereferenced uninitialised state and killed backboardd
+ *  (NATIVE_TRAP sig=11 right after family=1001).  The bridge device overrides
+ *  all four with empty bodies for the same reason, so the trace does too. */
+- (void)initLimits { caller("dev", "initLimits", "empty"); }
+- (void)initFeatureQueries { caller("dev", "initFeatureQueries", "empty"); }
+- (void)initGPUFamilySupport { caller("dev", "initGPUFamilySupport", "empty"); }
+- (void)initWorkarounds { caller("dev", "initWorkarounds", "empty"); }
+
 - (NSString *)name { caller("dev", "name", ""); return @"A540Trace"; }
 - (uint64_t)registryID { caller("dev", "registryID", ""); return 0x540; }
 - (unsigned long long)maxBufferLength { caller("dev", "maxBufferLength", ""); return 256ull << 20; }
@@ -227,6 +239,12 @@ static bool connectAccelerator(void)
     value("dev", "supportsFeatureSet:", "fs", featureSet);
     return YES;
 }
+
+/** H236gy: with _MTLDevice as the base, Metal dereferences the base class's
+ *  internal state right after -supportsFamily: and dies with SIGSEGV
+ *  (NATIVE_TRAP sig=11).  A base that owns no Metal state cannot do that, so
+ *  the class is plain NSObject again — this time with the protocol
+ *  conformance that go/gp lacked, which is what made Metal skip +alloc then. */
 
 /** H236gx: answering YES to Apple1 sent Metal into a path only a real device
  *  has and killed backboardd.  The stub now reports that it supports no GPU

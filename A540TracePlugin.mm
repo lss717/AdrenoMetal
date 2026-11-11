@@ -24,6 +24,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <mach/mach.h>
+
+#include "NativeAdrenoABI.h"
 
 @interface _MTLDevice : NSObject
 // The selector Metal sends to the principal class: declaring it lets the plugin
@@ -95,6 +98,134 @@ static bool connectAccelerator(void)
     return false;
 }
 
+/* H236hb: the plugin's own path to the GPU.  This is the first half of C6a:
+ *  the device Metal builds has to be able to allocate, map, submit and fence
+ *  real work through the native Adreno ABI from inside the hosting process
+ *  (backboardd), under its sandbox.  The sequence mirrors the userspace test
+ *  that runs from the probe daemon, but every step reports its own failure so
+ *  the kernel log shows exactly where it stops. */
+static int abi_call(uint32_t method, const void *input, size_t inputSize, void *output, size_t outputSize)
+{
+    struct { uint32_t magic, method; uint8_t payload[512]; } request;
+    if (inputSize > sizeof request.payload) return -1;
+    memset(&request, 0, sizeof request);
+    request.magic = kTunnelMagic;
+    request.method = method;
+    if (inputSize) memcpy(request.payload, input, inputSize);
+    size_t size = outputSize;
+    return IOConnectCallStructMethod(gConnection, gSelector, &request, 8 + inputSize, output, &size) == KERN_SUCCESS ? 0 : -1;
+}
+
+static uint32_t pm4_type7(uint32_t opcode, uint32_t count)
+{
+    return (3u << 30) | ((opcode & 0x7fu) << 16) | (count & 0x3fffu);
+}
+
+static void gpu_selftest(void)
+{
+    char line[160];
+    NativeAdrenoAbiParams params;
+    if (abi_call(NativeAdrenoMethodQuery, NULL, 0, &params, sizeof params)) { caller("gpu", "query", "failed"); return; }
+    snprintf(line, sizeof line, "abi=0x%x in=%u out=%u maxbo=%llu", params.abi_version,
+             params.input_bits, params.output_bits, (unsigned long long) params.max_bo_bytes);
+    caller("gpu", "query", line);
+
+    NativeAdrenoAbiDeviceInfo info;
+    if (abi_call(NativeAdrenoMethodGetDeviceInfo, NULL, 0, &info, sizeof info)) { caller("gpu", "info", "failed"); return; }
+    snprintf(line, sizeof line, "chip=0x%x gmem=%u va=0x%llx+0x%llx",
+             info.chip_id, info.gmem_bytes, (unsigned long long) info.va_start, (unsigned long long) info.va_size);
+    caller("gpu", "info", line);
+
+    NativeAdrenoAbiBoAlloc request = { 4096, 12, 0 };
+    NativeAdrenoAbiBoAllocReply ib, target;
+    if (abi_call(NativeAdrenoMethodBoAlloc, &request, sizeof request, &ib, sizeof ib)) { caller("gpu", "boalloc-ib", "failed"); return; }
+    if (abi_call(NativeAdrenoMethodBoAlloc, &request, sizeof request, &target, sizeof target)) { caller("gpu", "boalloc-target", "failed"); return; }
+
+    const uint64_t ibIova = info.va_start;
+    const uint64_t targetIova = info.va_start + 0x1000;
+    NativeAdrenoAbiBoMap mapIb = { ib.handle, ibIova, 1, 0, 2, 0 };
+    NativeAdrenoAbiBoMap mapTarget = { target.handle, targetIova, 3, 0, 2, 0 };
+    NativeAdrenoAbiBoMapReply mapped;
+    if (abi_call(NativeAdrenoMethodBoMap, &mapIb, sizeof mapIb, &mapped, sizeof mapped)) { caller("gpu", "bomap-ib", "failed"); return; }
+    if (abi_call(NativeAdrenoMethodBoMap, &mapTarget, sizeof mapTarget, &mapped, sizeof mapped)) { caller("gpu", "bomap-target", "failed"); return; }
+
+    NativeAdrenoAbiBoCpuMap cpuIb = { ib.handle }, cpuTarget = { target.handle };
+    NativeAdrenoAbiBoCpuMapReply tokenIb, tokenTarget;
+    if (abi_call(NativeAdrenoMethodBoCpuMap, &cpuIb, sizeof cpuIb, &tokenIb, sizeof tokenIb)) { caller("gpu", "cpumap-ib", "failed"); return; }
+    if (abi_call(NativeAdrenoMethodBoCpuMap, &cpuTarget, sizeof cpuTarget, &tokenTarget, sizeof tokenTarget)) { caller("gpu", "cpumap-target", "failed"); return; }
+
+    mach_vm_address_t ibAddress = 0, targetAddress = 0;
+    mach_vm_size_t ibLength = 0, targetLength = 0;
+    // The driver hands back an uncached view of the BO's raw spans, which is
+    // what the userspace test maps: kIOMapAnywhere | kIOMapInhibitCache.
+    const IOOptionBits mapOptions = kIOMapAnywhere | kIOMapInhibitCache;
+    kern_return_t mapStatus = IOConnectMapMemory64(gConnection, tokenIb.token, mach_task_self(), &ibAddress, &ibLength, mapOptions);
+    if (mapStatus != KERN_SUCCESS) {
+        snprintf(line, sizeof line, "kr=0x%x options=0x%x", mapStatus, (unsigned) mapOptions);
+        caller("gpu", "map-ib", line);
+        return;
+    }
+    mapStatus = IOConnectMapMemory64(gConnection, tokenTarget.token, mach_task_self(), &targetAddress, &targetLength, mapOptions);
+    if (mapStatus != KERN_SUCCESS) {
+        snprintf(line, sizeof line, "kr=0x%x options=0x%x", mapStatus, (unsigned) mapOptions);
+        caller("gpu", "map-target", line);
+        return;
+    }
+    snprintf(line, sizeof line, "ib=%llu target=%llu", (unsigned long long) ibLength, (unsigned long long) targetLength);
+    caller("gpu", "mapped", line);
+
+    volatile uint32_t *targetWords = (volatile uint32_t *) (uintptr_t) targetAddress;
+    volatile uint32_t *ibWords = (volatile uint32_t *) (uintptr_t) ibAddress;
+    for (unsigned i = 0; i < 1024; ++i) targetWords[i] = 0xdeadbeefu;
+
+    const uint32_t values[3] = { 0x0adc0de1u, 0xfeed0002u, 0x600d0003u };
+    unsigned w = 0;
+    for (unsigned i = 0; i < 3; ++i) {
+        ibWords[w++] = pm4_type7(0x3d /* CP_MEM_WRITE */, 3);
+        ibWords[w++] = (uint32_t) (targetIova + i * 4);
+        ibWords[w++] = (uint32_t) ((targetIova + i * 4) >> 32);
+        ibWords[w++] = values[i];
+    }
+    __asm__ volatile("dsb sy" ::: "memory");   // the mapping is non-cacheable; the GPU is an outer-shareable observer
+
+    NativeAdrenoAbiSubmit submit;
+    memset(&submit, 0, sizeof submit);
+    submit.buffer_count = 1;
+    submit.buffers[0].handle = ib.handle;
+    submit.buffers[0].iova = ibIova;
+    submit.buffers[0].bytes = w * 4;
+    NativeAdrenoAbiSubmitReply reply;
+    if (abi_call(NativeAdrenoMethodSubmit, &submit, sizeof submit, &reply, sizeof reply)) { caller("gpu", "submit", "failed"); return; }
+
+    NativeAdrenoAbiTimestamp before, after;
+    const bool haveBefore = abi_call(NativeAdrenoMethodGetTimestamp, NULL, 0, &before, sizeof before) == 0;
+    NativeAdrenoAbiWaitFence wait = { reply.fence, 200000000ull };
+    if (abi_call(NativeAdrenoMethodWaitFence, &wait, sizeof wait, NULL, 0)) {
+        // A fence that never completes means the CP did not run the buffer.
+        // The GPU clock and the fault counters say whether the CP is alive at
+        // all (NaN: the timestamp method itself is unsupported).
+        const bool haveAfter = abi_call(NativeAdrenoMethodGetTimestamp, NULL, 0, &after, sizeof after) == 0;
+        NativeAdrenoAbiStatus status = { 0, 0 };
+        abi_call(NativeAdrenoMethodGetStatus, NULL, 0, &status, sizeof status);
+        snprintf(line, sizeof line, "fence=%llu ticks=%llu->%llu faults=%llu suspends=%llu",
+                 (unsigned long long) reply.fence,
+                 (unsigned long long) (haveBefore ? before.ticks : 0),
+                 (unsigned long long) (haveAfter ? after.ticks : 0),
+                 (unsigned long long) status.faults, (unsigned long long) status.suspends);
+        caller("gpu", "fence", line);
+        return;
+    }
+
+    __asm__ volatile("dsb sy" ::: "memory");
+    const unsigned hits = (targetWords[0] == values[0]) + (targetWords[1] == values[1]) +
+                          (targetWords[2] == values[2]) + (targetWords[3] == 0xdeadbeefu);
+    snprintf(line, sizeof line, "hits=%u/%u fence=%llu t0=%08x t3=%08x", hits, 4u,
+             (unsigned long long) reply.fence, targetWords[0], targetWords[3]);
+    caller("gpu", "selftest", line);
+}
+
+static id trace_object(const char *kind);
+
 /** H236gt: the abandon point is newCommandQueue, so the queue itself has to be
  *  traced too.  It is an opaque object for Metal (a plugin builds both), and
  *  every selector the renderer sends that is not implemented is reported. */
@@ -108,12 +239,12 @@ static bool connectAccelerator(void)
     caller("queue", "doesNotRecognize:", sel_getName(selector));
 }
 
-- (id)commandBuffer { caller("queue", "commandBuffer", ""); return nil; }
-- (id)newCommandBuffer { caller("queue", "newCommandBuffer", ""); return nil; }
+- (id)commandBuffer { caller("queue", "commandBuffer", ""); return trace_object("cmdbuf"); }
+- (id)newCommandBuffer { caller("queue", "newCommandBuffer", ""); return trace_object("cmdbuf"); }
 - (id)commandBufferWithDescriptor:(id)descriptor
 {
     caller("queue", "commandBufferWithDescriptor:", descriptor ? "descriptor=1" : "descriptor=0");
-    return nil;
+    return trace_object("cmdbuf");
 }
 - (void)setLabel:(id)label { caller("queue", "setLabel:", label ? "label=1" : "label=0"); }
 - (id)device { caller("queue", "device", ""); return gDeviceInstance; }
@@ -142,6 +273,35 @@ static bool connectAccelerator(void)
 - (void)dealloc { caller("queue", "dealloc", ""); }
 
 @end
+
+/** H236ha: every creation call must answer an object.  The published bridge
+ *  device does the same (nmb_* handles) and Metal then carries on to its device
+ *  information queries; answering nil instead makes Metal dereference NULL in
+ *  its own bookkeeping (gz: SIGSEGV 38 ms after the depth/stencil state). */
+@interface A540TraceObject : NSObject
+{
+@public
+    const char *kind;
+}
+@end
+
+@implementation A540TraceObject
+
+- (void)doesNotRecognizeSelector:(SEL)selector
+{
+    caller(kind, "doesNotRecognize:", sel_getName(selector));
+}
+
+- (void)dealloc { caller(kind, "dealloc", ""); }
+
+@end
+
+static id trace_object(const char *kind)
+{
+    A540TraceObject *object = [[A540TraceObject alloc] init];
+    object->kind = kind;
+    return object;
+}
 
 @interface A540TraceDevice : _MTLDevice
 @end
@@ -211,20 +371,33 @@ static bool connectAccelerator(void)
     // instance is offered again and the inventory follows if it is accepted.
     gDeviceInstance = self;
     caller("dev", "initWithAcceleratorPort:", "device=returned");
+    // H236hb: prove the plugin itself can drive the GPU from this process.
+    static bool tested;
+    if (!tested && gConnection) {
+        tested = true;
+        gpu_selftest();
+    }
     return self;
 }
 
-/** H236gz: _MTLAddDevice runs these four on every device it registers.  The
- *  target's implementations fill the base class's limits and feature tables
- *  from a hardware profile (featureProfile and the Apple GPU tables); with the
- *  base implementations left in place and no profile, the very next query
- *  (supportsFamily:) dereferenced uninitialised state and killed backboardd
- *  (NATIVE_TRAP sig=11 right after family=1001).  The bridge device overrides
- *  all four with empty bodies for the same reason, so the trace does too. */
-- (void)initLimits { caller("dev", "initLimits", "empty"); }
-- (void)initFeatureQueries { caller("dev", "initFeatureQueries", "empty"); }
-- (void)initGPUFamilySupport { caller("dev", "initGPUFamilySupport", "empty"); }
-- (void)initWorkarounds { caller("dev", "initWorkarounds", "empty"); }
+/** H236hd: disassembly of the target's Metal (see the subagent report,
+ *  build-environment §45.32) settles what this protocol actually is:
+ *
+ *  - `featureProfile` is an NSUInteger profile bitmask, not a dictionary:
+ *    Metal has no implementation of it, the plugin supplies it, and
+ *    initLimits/initFeatureQueries/initGPUFamilySupport all read it.
+ *  - `-[_MTLDevice supportsFamily:]` walks an inline std::vector at ivar
+ *    +0x110 with `ldp` and NO null check, so it crashes (SIGSEGV) unless
+ *    initFeatureQueries built that vector: gz's empty overrides were the bug.
+ *  - initWorkarounds is a bare `ret`.
+ *
+ *  So the profile is provided and the base implementations are left alone. */
+- (NSUInteger)featureProfile
+{
+    caller("dev", "featureProfile", "profile=1");
+    return 1;
+}
+
 
 - (NSString *)name { caller("dev", "name", ""); return @"A540Trace"; }
 - (uint64_t)registryID { caller("dev", "registryID", ""); return 0x540; }
@@ -276,36 +449,36 @@ static bool connectAccelerator(void)
     char detail[64];
     snprintf(detail, sizeof detail, "length=%llu options=%llu", length, options);
     caller("dev", "newBufferWithLength:options:", detail);
-    return nil;
+    return trace_object("buffer");
 }
 
 - (id)newTextureWithDescriptor:(id)descriptor
 {
     caller("dev", "newTextureWithDescriptor:", descriptor ? "descriptor=1" : "descriptor=0");
-    return nil;
+    return trace_object("texture");
 }
 
 - (id)newRenderPipelineStateWithDescriptor:(id)descriptor error:(id *)error
 {
     caller("dev", "newRenderPipelineStateWithDescriptor:error:", descriptor ? "descriptor=1" : "descriptor=0");
-    return nil;
+    return trace_object("pipeline");
 }
 
 - (id)newDepthStencilStateWithDescriptor:(id)descriptor
 {
     caller("dev", "newDepthStencilStateWithDescriptor:", descriptor ? "descriptor=1" : "descriptor=0");
-    return nil;
+    return trace_object("state");
 }
 
 - (id)newSamplerStateWithDescriptor:(id)descriptor
 {
     caller("dev", "newSamplerStateWithDescriptor:", descriptor ? "descriptor=1" : "descriptor=0");
-    return nil;
+    return trace_object("sampler");
 }
 
-- (id)newDefaultLibrary { caller("dev", "newDefaultLibrary", ""); return nil; }
-- (id)newFence { caller("dev", "newFence", ""); return nil; }
-- (id)newEvent { caller("dev", "newEvent", ""); return nil; }
+- (id)newDefaultLibrary { caller("dev", "newDefaultLibrary", ""); return trace_object("library"); }
+- (id)newFence { caller("dev", "newFence", ""); return trace_object("fence"); }
+- (id)newEvent { caller("dev", "newEvent", ""); return trace_object("event"); }
 - (void)dealloc { caller("dev", "dealloc", ""); }
 
 @end

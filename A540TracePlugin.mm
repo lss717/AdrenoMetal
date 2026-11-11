@@ -163,6 +163,26 @@ static void probe_displays(const char *why)
                     }
                 } @catch (id ignored) { boundsText = nil; }
             }
+            if (index == 0) {
+                /* H236hz: whether any process ever connected to the window server for this display.
+                 * A zero here matches "no client submits a layer tree"; a non-zero one would move the
+                 * question into the compositor.  The selector is private, so it is asked for first. */
+                NSString *counters = nil;
+                @try {
+                    for (NSString *selectorName in @[@"contexts", @"contextIds", @"clients"]) {
+                        SEL sel = NSSelectorFromString(selectorName);
+                        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(item, @selector(respondsToSelector:), sel)) {
+                            id value = ((id (*)(id, SEL)) objc_msgSend)(item, sel);
+                            unsigned long long n = value ? ((unsigned long long (*)(id, SEL)) objc_msgSend)(value, @selector(count)) : 0;
+                            counters = [NSString stringWithFormat:@"%@ %@=%llu", counters ?: @"", selectorName, n];
+                        }
+                    }
+                } @catch (id ignored) { counters = nil; }
+                if (counters) {
+                    snprintf(detail, sizeof detail, "server%s", [counters UTF8String]);
+                    caller("ca", "clients", detail);
+                }
+            }
             snprintf(detail, sizeof detail, "list[%llu] name=%s device=%s bounds=%s",
                      index, displayName ? [displayName UTF8String] : "nil",
                      deviceName ? [deviceName UTF8String] : "nil",

@@ -202,18 +202,41 @@ static int find_process(const char *name)
     return found;
 }
 
+/* H236hw: backboardd cannot enumerate processes (process-info-listpids is denied by its
+ * sandbox), so the restart goes through the frameworks it already talks to: FrontBoardServices
+ * owns application termination, RunningBoardServices the same in its newer form.  Both are
+ * private, so they are loaded by name and every call is guarded and logged. */
 static void restart_springboard(const char *why)
 {
+    char detail[160];
     const int pid = find_process("SpringBoard");
-    char detail[128];
-    if (pid <= 0) {
-        snprintf(detail, sizeof detail, "%s springboard=none refused=%d", why, gScanRefused);
+    snprintf(detail, sizeof detail, "%s scan=%d refused=%d", why, pid, gScanRefused);
+    caller("ca", "restart", detail);
+    if (pid > 0) {
+        const int status = kill(pid, SIGTERM);
+        snprintf(detail, sizeof detail, "%s kill pid=%d status=%d", why, pid, status);
         caller("ca", "restart", detail);
+        if (status == 0) return;
+    }
+    dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices", RTLD_NOW);
+    Class serviceClass = NSClassFromString(@"FBSSystemService");
+    if (!serviceClass) { caller("ca", "restart", "fbs=no-class"); return; }
+    id service = ((id (*)(id, SEL)) objc_msgSend)(serviceClass, @selector(sharedService));
+    if (!service) service = ((id (*)(id, SEL)) objc_msgSend)(((id (*)(id, SEL)) objc_msgSend)(serviceClass, @selector(alloc)),
+                                                            @selector(init));
+    if (!service) { caller("ca", "restart", "fbs=no-service"); return; }
+    const SEL terminate = NSSelectorFromString(@"terminateApplication:forReason:andReport:withDescription:");
+    if (!((BOOL (*)(id, SEL, SEL)) objc_msgSend)(service, @selector(respondsToSelector:), terminate)) {
+        caller("ca", "restart", "fbs=no-terminate");
         return;
     }
-    const int status = kill(pid, SIGTERM);
-    snprintf(detail, sizeof detail, "%s pid=%d kill=%d", why, pid, status);
-    caller("ca", "restart", detail);
+    @try {
+        ((void (*)(id, SEL, id, unsigned long long, BOOL, id)) objc_msgSend)(
+            service, terminate, @"com.apple.springboard", 1ull, YES, @"bring-up: render server was late");
+        caller("ca", "restart", "fbs=sent");
+    } @catch (id exception) {
+        caller("ca", "restart", "fbs=exception");
+    }
 }
 
 static void schedule_display_probes(void)

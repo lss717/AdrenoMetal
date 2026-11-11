@@ -17,6 +17,7 @@
 //    the trace opens its own connection through IOServiceOpen;
 //  * a device that never answers leaves Metal retrying, which is exactly the
 //    abandon point the inventory below has to capture.
+#define _XOPEN_SOURCE 700   /* ucontext.h: the crash reporter reads pc/lr/sp/fp */
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
@@ -25,6 +26,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <mach/mach.h>
+#include <signal.h>
+#include <ucontext.h>
+#include <mach-o/dyld.h>
 
 #include "NativeAdrenoABI.h"
 
@@ -75,6 +79,48 @@ static void value(const char *cls, const char *sel, const char *name, unsigned l
     char detail[64];
     snprintf(detail, sizeof detail, "%s=%llu", name, v);
     caller(cls, sel, detail);
+}
+
+/** H236hi: Metal's assertion fires with no message we can see (backboardd is a
+ *  platform process; its stderr is not in the kernel log).  The plugin installs
+ *  a signal handler that reports the fault address and the frame-pointer chain
+ *  through the ABI log, so the aborting image and offset can be resolved
+ *  offline against the extracted dyld cache. */
+static void report_signal(int number, siginfo_t *info, void *context)
+{
+    ucontext_t *state = (ucontext_t *) context;
+    char line[184];
+    unsigned long long pc = state ? (unsigned long long) state->uc_mcontext->__ss.__pc : 0;
+    unsigned long long lr = state ? (unsigned long long) state->uc_mcontext->__ss.__lr : 0;
+    unsigned long long sp = state ? (unsigned long long) state->uc_mcontext->__ss.__sp : 0;
+    unsigned long long fp = state ? (unsigned long long) state->uc_mcontext->__ss.__fp : 0;
+    snprintf(line, sizeof line, "signal=%d addr=0x%llx pc=0x%llx lr=0x%llx sp=0x%llx",
+             number, (unsigned long long) (info ? (unsigned long long) (uintptr_t) info->si_addr : 0), pc, lr, sp);
+    emit(line);
+    for (unsigned depth = 0; depth < 6 && fp; ++depth) {
+        const unsigned long long *frame = (const unsigned long long *) (uintptr_t) fp;
+        snprintf(line, sizeof line, "frame%d fp=0x%llx ret=0x%llx", depth, fp,
+                 frame ? (unsigned long long) frame[1] : 0);
+        emit(line);
+        fp = frame ? frame[0] : 0;
+        if (sp && (fp < sp || fp - sp > 0x20000)) break;
+    }
+    signal(number, SIG_DFL);
+    raise(number);
+}
+
+static void install_crash_reporter(void)
+{
+    static bool installed;
+    if (installed) return;
+    installed = true;
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_sigaction = report_signal;
+    action.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigaction(SIGABRT, &action, NULL);
+    sigaction(SIGSEGV, &action, NULL);
+    sigaction(SIGILL, &action, NULL);
 }
 
 static bool connectAccelerator(void)
@@ -225,6 +271,7 @@ static void gpu_selftest(void)
 }
 
 static id trace_object(const char *kind);
+static id trace_object_of(const char *className, const char *kind);
 
 /** H236gt: the abandon point is newCommandQueue, so the queue itself has to be
  *  traced too.  It is an opaque object for Metal (a plugin builds both), and
@@ -234,17 +281,52 @@ static id trace_object(const char *kind);
 
 @implementation A540TraceQueue
 
+/** H236hl: Metal sends a stream of private void setters (setSubmissionQueue:,
+ *  setCompletionQueue:, setGPUPriority:, …).  Answering one by letting
+ *  -doesNotRecognizeSelector: return leaves the caller with a value it does not
+ *  expect and CoreFoundation traps (SIGILL right after setGPUPriority:), so a
+ *  generic void setter forwarder answers all of them and logs the name. */
+/** H236hn: after the depth/stencil state the renderer's stream is not only
+ *  `set…:` (the blit pass sends copyFromTexture:…).  Every unimplemented
+ *  selector with arguments is answered as a void method taking that many
+ *  objects — the colon count is the argument count — and logged. */
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)selector
+{
+    static char types[16][64];
+    static unsigned slot;
+    const char *name = sel_getName(selector);
+    unsigned arguments = 0;
+    for (const char *cursor = name; *cursor; ++cursor)
+        if (*cursor == ':') ++arguments;
+    if (arguments && arguments <= 12) {
+        char *text = types[slot++ & 15];
+        unsigned at = 0;
+        text[at++] = 'v';
+        text[at++] = '@';
+        text[at++] = ':';
+        for (unsigned index = 0; index < arguments; ++index) text[at++] = '@';
+        text[at] = 0;
+        return [NSMethodSignature signatureWithObjCTypes:text];
+    }
+    return [super methodSignatureForSelector:selector];
+}
+
+- (void)forwardInvocation:(NSInvocation *)invocation
+{
+    caller("queue", "forward:", sel_getName([invocation selector]));
+}
+
 - (void)doesNotRecognizeSelector:(SEL)selector
 {
     caller("queue", "doesNotRecognize:", sel_getName(selector));
 }
 
-- (id)commandBuffer { caller("queue", "commandBuffer", ""); return trace_object("cmdbuf"); }
-- (id)newCommandBuffer { caller("queue", "newCommandBuffer", ""); return trace_object("cmdbuf"); }
+- (id)commandBuffer { caller("queue", "commandBuffer", ""); return trace_object_of("_MTLCommandBuffer", "cmdbuf"); }
+- (id)newCommandBuffer { caller("queue", "newCommandBuffer", ""); return trace_object_of("_MTLCommandBuffer", "cmdbuf"); }
 - (id)commandBufferWithDescriptor:(id)descriptor
 {
     caller("queue", "commandBufferWithDescriptor:", descriptor ? "descriptor=1" : "descriptor=0");
-    return trace_object("cmdbuf");
+    return trace_object_of("_MTLCommandBuffer", "cmdbuf");
 }
 - (void)setLabel:(id)label { caller("queue", "setLabel:", label ? "label=1" : "label=0"); }
 - (id)device { caller("queue", "device", ""); return gDeviceInstance; }
@@ -287,10 +369,86 @@ static id trace_object(const char *kind);
 
 @implementation A540TraceObject
 
+/** H236hl: Metal sends a stream of private void setters (setSubmissionQueue:,
+ *  setCompletionQueue:, setGPUPriority:, …).  Answering one by letting
+ *  -doesNotRecognizeSelector: return leaves the caller with a value it does not
+ *  expect and CoreFoundation traps (SIGILL right after setGPUPriority:), so a
+ *  generic void setter forwarder answers all of them and logs the name. */
+/** H236hn: after the depth/stencil state the renderer's stream is not only
+ *  `set…:` (the blit pass sends copyFromTexture:…).  Every unimplemented
+ *  selector with arguments is answered as a void method taking that many
+ *  objects — the colon count is the argument count — and logged. */
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)selector
+{
+    static char types[16][64];
+    static unsigned slot;
+    const char *name = sel_getName(selector);
+    unsigned arguments = 0;
+    for (const char *cursor = name; *cursor; ++cursor)
+        if (*cursor == ':') ++arguments;
+    if (arguments && arguments <= 12) {
+        char *text = types[slot++ & 15];
+        unsigned at = 0;
+        text[at++] = 'v';
+        text[at++] = '@';
+        text[at++] = ':';
+        for (unsigned index = 0; index < arguments; ++index) text[at++] = '@';
+        text[at] = 0;
+        return [NSMethodSignature signatureWithObjCTypes:text];
+    }
+    return [super methodSignatureForSelector:selector];
+}
+
+- (void)forwardInvocation:(NSInvocation *)invocation
+{
+    caller("kind", "forward:", sel_getName([invocation selector]));
+}
+
 - (void)doesNotRecognizeSelector:(SEL)selector
 {
     caller(kind, "doesNotRecognize:", sel_getName(selector));
 }
+
+/** H236hm: the render path itself.  After the depth/stencil state and the
+ *  textures, CA asks the command buffer for a render command encoder; answering
+ *  nothing there ended the run.  The encoders are stubs and the encoding
+ *  setters are answered by the generic forwarder, so the first frame reaches
+ *  -commit, which is where the driver's own submission will go. */
+- (id)renderCommandEncoderWithDescriptor:(id)descriptor
+{
+    caller(kind, "renderCommandEncoderWithDescriptor:", descriptor ? "descriptor=1" : "descriptor=0");
+    return trace_object_of("_MTLRenderCommandEncoder", "encoder");
+}
+
+- (id)computeCommandEncoderWithDescriptor:(id)descriptor
+{
+    caller(kind, "computeCommandEncoderWithDescriptor:", descriptor ? "descriptor=1" : "descriptor=0");
+    return trace_object_of("_MTLComputeCommandEncoder", "encoder");
+}
+
+- (id)blitCommandEncoder
+{
+    caller(kind, "blitCommandEncoder", "");
+    return trace_object_of("_MTLBlitCommandEncoder", "encoder");
+}
+
+- (id)parallelRenderCommandEncoderWithDescriptor:(id)descriptor
+{
+    caller(kind, "parallelRenderCommandEncoderWithDescriptor:", descriptor ? "descriptor=1" : "descriptor=0");
+    return trace_object_of("_MTLParallelRenderCommandEncoder", "encoder");
+}
+
+- (void)endEncoding { caller(kind, "endEncoding", ""); }
+- (void)presentDrawable:(id)drawable { caller(kind, "presentDrawable:", drawable ? "drawable=1" : "drawable=0"); }
+- (void)presentDrawable:(id)drawable atTime:(double)time
+{
+    char detail[64];
+    snprintf(detail, sizeof detail, "drawable=%d at=%llu", drawable ? 1 : 0, (unsigned long long) (time * 1e9));
+    caller(kind, "presentDrawable:atTime:", detail);
+}
+- (void)commit { caller(kind, "commit", ""); }
+- (void)waitUntilCompleted { caller(kind, "waitUntilCompleted", ""); }
+- (void)waitUntilScheduled { caller(kind, "waitUntilScheduled", ""); }
 
 - (void)dealloc { caller(kind, "dealloc", ""); }
 
@@ -300,6 +458,83 @@ static id trace_object(const char *kind)
 {
     A540TraceObject *object = [[A540TraceObject alloc] init];
     object->kind = kind;
+    return object;
+}
+
+/** H236hh: Metal's own objects are class-gated (the device itself had to pass
+ *  `isSubclassOfClass:`), so a plain NSObject handed back from a creation call
+ *  is refused with an assertion (backboardd SIGABRT right after the depth/
+ *  stencil state was made).  The stub is therefore built as a runtime subclass
+ *  of the real class Metal expects, with the logging methods copied over. */
+static id trace_object_of(const char *className, const char *kind)
+{
+    static struct { const char *name; Class cls; } cache[24];
+    static unsigned cached;
+    Class base = objc_getClass(className);
+    if (!base) return trace_object(kind);
+    Class cls = Nil;
+    for (unsigned i = 0; i < cached; ++i)
+        if (!strcmp(cache[i].name, className)) { cls = cache[i].cls; break; }
+    if (!cls) {
+        char name[96];
+        snprintf(name, sizeof name, "A540Trace_%s", className);
+        cls = objc_allocateClassPair(base, name, 0);
+        if (!cls) return trace_object(kind);
+        unsigned count = 0;
+        Method *methods = class_copyMethodList([A540TraceObject class], &count);
+        for (unsigned index = 0; index < count; ++index)
+            class_addMethod(cls, method_getName(methods[index]),
+                            method_getImplementation(methods[index]), method_getTypeEncoding(methods[index]));
+        free(methods);
+        objc_registerClassPair(cls);
+        if (cached < sizeof cache / sizeof cache[0]) { cache[cached].name = className; cache[cached].cls = cls; ++cached; }
+    }
+    A540TraceObject *object = [[cls alloc] init];
+    object->kind = kind;
+    return object;
+}
+
+/** H236hk: the abort came from +[MTLLoader sliceIDForDevice:...] line 666,
+ *  which is `MTLReportFailure` after `[device targetDeviceArchitecture]`
+ *  returned nil (Metal +0xa3e4 -> +0x14ef54 = _MTLReportFailure.cold.1).
+ *  CA loads a pre-compiled metallib (MTLBinaryArchive) and needs that
+ *  architecture object to pick a slice.  The plugin supplies one. */
+@interface A540TraceArchitecture : NSObject
+@end
+
+@implementation A540TraceArchitecture
+
+- (unsigned)cpuType { caller("arch", "cpuType", ""); return 0x0100000Cu; } /* CPU_TYPE_ARM64 */
+- (unsigned)subType { caller("arch", "subType", ""); return 0; }
+- (unsigned long long)driverVersion { caller("arch", "driverVersion", ""); return 0; }
+- (unsigned)versionCombined { caller("arch", "versionCombined", ""); return 0; }
+- (void)doesNotRecognizeSelector:(SEL)selector { caller("arch", "doesNotRecognize:", sel_getName(selector)); }
+- (void)dealloc { caller("arch", "dealloc", ""); }
+
+@end
+
+static id trace_architecture(void)
+{
+    static Class cls;
+    static bool tried;
+    if (!tried) {
+        tried = true;
+        Class base = objc_getClass("MTLTargetDeviceArchitecture");
+        if (base) {
+            cls = objc_allocateClassPair(base, "A540TraceArch", 0);
+            if (cls) {
+                unsigned count = 0;
+                Method *methods = class_copyMethodList([A540TraceArchitecture class], &count);
+                for (unsigned index = 0; index < count; ++index)
+                    class_addMethod(cls, method_getName(methods[index]),
+                                    method_getImplementation(methods[index]), method_getTypeEncoding(methods[index]));
+                free(methods);
+                objc_registerClassPair(cls);
+            }
+        }
+    }
+    id object = cls ? [[cls alloc] init] : [[A540TraceArchitecture alloc] init];
+    caller("dev", "targetDeviceArchitecture", cls ? "real-base" : "plain-base");
     return object;
 }
 
@@ -318,6 +553,14 @@ static id trace_object(const char *kind)
 + (void)load
 {
     gLoaded = true;
+    install_crash_reporter();
+    // The crash address is only meaningful with the ASLR slide: every image in
+    // the process (shared cache included) is moved by the same amount.
+    {
+        char line[96];
+        snprintf(line, sizeof line, "slide=0x%llx", (unsigned long long) _dyld_get_image_vmaddr_slide(0));
+        emit(line);
+    }
     // H236gs: Metal's device registration asserts that the plugin's device
     // conforms to MTLDevice and to the private MTLDeviceSPI.  The target's own
     // drivers inherit that from their IOGPU base; a plugin class has to declare
@@ -350,6 +593,42 @@ static id trace_object(const char *kind)
     caller("cls", "doesNotRecognize:", sel_getName(selector));
 }
 
+/** H236hl: Metal sends a stream of private void setters (setSubmissionQueue:,
+ *  setCompletionQueue:, setGPUPriority:, …).  Answering one by letting
+ *  -doesNotRecognizeSelector: return leaves the caller with a value it does not
+ *  expect and CoreFoundation traps (SIGILL right after setGPUPriority:), so a
+ *  generic void setter forwarder answers all of them and logs the name. */
+/** H236hn: after the depth/stencil state the renderer's stream is not only
+ *  `set…:` (the blit pass sends copyFromTexture:…).  Every unimplemented
+ *  selector with arguments is answered as a void method taking that many
+ *  objects — the colon count is the argument count — and logged. */
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)selector
+{
+    static char types[16][64];
+    static unsigned slot;
+    const char *name = sel_getName(selector);
+    unsigned arguments = 0;
+    for (const char *cursor = name; *cursor; ++cursor)
+        if (*cursor == ':') ++arguments;
+    if (arguments && arguments <= 12) {
+        char *text = types[slot++ & 15];
+        unsigned at = 0;
+        text[at++] = 'v';
+        text[at++] = '@';
+        text[at++] = ':';
+        for (unsigned index = 0; index < arguments; ++index) text[at++] = '@';
+        text[at] = 0;
+        return [NSMethodSignature signatureWithObjCTypes:text];
+    }
+    return [super methodSignatureForSelector:selector];
+}
+
+- (void)forwardInvocation:(NSInvocation *)invocation
+{
+    caller("dev", "forward:", sel_getName([invocation selector]));
+}
+
+
 - (instancetype)init
 {
     caller("dev", "init", "");
@@ -361,6 +640,18 @@ static id trace_object(const char *kind)
     char detail[64];
     snprintf(detail, sizeof detail, "port=0x%x", port);
     caller("dev", "initWithAcceleratorPort:", detail);
+    // H236hg: _MTLDevice -init (0x187ACF7C8) is the scaffolding every later
+    // library/pipeline path dereferences without a null check: it creates
+    // _libraryBuilder (0x178), _pipelineLibraryBuilder (0x180), the three
+    // dispatch queues (0x118/0x120/0x128) and _progressTrackBufferStack.
+    // Without it Metal segfaults (exc=1 code=1) right after the MSAA and
+    // depth-stencil-texture gates, with no further message to the device.
+    id base = [super init];
+    if (!base) {
+        caller("dev", "initWithAcceleratorPort:", "super-init-nil");
+        return nil;
+    }
+    self = base;
     if (!connectAccelerator()) caller("dev", "initWithAcceleratorPort:", "no-tunnel");
     // H236go: _MTLDevice has no -initWithAcceleratorPort: of its own (gn proved
     // it); the plugin builds the device.  H236gq: the class must be a registered
@@ -423,10 +714,14 @@ static id trace_object(const char *kind)
  *  has and killed backboardd.  The stub now reports that it supports no GPU
  *  family, so the renderer takes its compatibility branch and keeps asking
  *  questions instead of dying. */
-- (BOOL)supportsFamily:(long long)family
+/** H236hg: no override here.  With featureProfile=1 the base class already
+ *  keeps a valid _supportedGPUFamilies vector (Apple1/2/4/5/6/7, Mac1,
+ *  Common1-3, MacCat1) and answering NO to everything only hides the data
+ *  Metal uses to choose its fallbacks. */
+
+- (id)targetDeviceArchitecture
 {
-    value("dev", "supportsFamily:", "family", (unsigned long long) family);
-    return NO;
+    return trace_architecture();
 }
 
 - (unsigned long long)recommendedMaxWorkingSetSize { caller("dev", "recommendedMaxWorkingSetSize", ""); return 0; }
@@ -449,36 +744,36 @@ static id trace_object(const char *kind)
     char detail[64];
     snprintf(detail, sizeof detail, "length=%llu options=%llu", length, options);
     caller("dev", "newBufferWithLength:options:", detail);
-    return trace_object("buffer");
+    return trace_object_of("_MTLBuffer", "buffer");
 }
 
 - (id)newTextureWithDescriptor:(id)descriptor
 {
     caller("dev", "newTextureWithDescriptor:", descriptor ? "descriptor=1" : "descriptor=0");
-    return trace_object("texture");
+    return trace_object_of("_MTLTexture", "texture");
 }
 
 - (id)newRenderPipelineStateWithDescriptor:(id)descriptor error:(id *)error
 {
     caller("dev", "newRenderPipelineStateWithDescriptor:error:", descriptor ? "descriptor=1" : "descriptor=0");
-    return trace_object("pipeline");
+    return trace_object_of("_MTLRenderPipelineState", "pipeline");
 }
 
 - (id)newDepthStencilStateWithDescriptor:(id)descriptor
 {
     caller("dev", "newDepthStencilStateWithDescriptor:", descriptor ? "descriptor=1" : "descriptor=0");
-    return trace_object("state");
+    return trace_object_of("_MTLDepthStencilState", "state");
 }
 
 - (id)newSamplerStateWithDescriptor:(id)descriptor
 {
     caller("dev", "newSamplerStateWithDescriptor:", descriptor ? "descriptor=1" : "descriptor=0");
-    return trace_object("sampler");
+    return trace_object_of("_MTLSamplerState", "sampler");
 }
 
-- (id)newDefaultLibrary { caller("dev", "newDefaultLibrary", ""); return trace_object("library"); }
-- (id)newFence { caller("dev", "newFence", ""); return trace_object("fence"); }
-- (id)newEvent { caller("dev", "newEvent", ""); return trace_object("event"); }
+- (id)newDefaultLibrary { caller("dev", "newDefaultLibrary", ""); return trace_object_of("_MTLLibrary", "library"); }
+- (id)newFence { caller("dev", "newFence", ""); return trace_object_of("_MTLFence", "fence"); }
+- (id)newEvent { caller("dev", "newEvent", ""); return trace_object_of("_MTLEvent", "event"); }
 - (void)dealloc { caller("dev", "dealloc", ""); }
 
 @end

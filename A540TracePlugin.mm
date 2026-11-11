@@ -25,6 +25,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>   /* getprogname */
 #include <mach/mach.h>
 #include <signal.h>
 #include <ucontext.h>
@@ -48,6 +49,7 @@ static unsigned gSequence;
 static unsigned gBudget = 800;
 static bool gLoaded;
 static id gDeviceInstance;
+static id gQueueInstance;
 
 static bool connectAccelerator(void);
 
@@ -446,9 +448,24 @@ static id trace_object_of(const char *className, const char *kind);
     snprintf(detail, sizeof detail, "drawable=%d at=%llu", drawable ? 1 : 0, (unsigned long long) (time * 1e9));
     caller(kind, "presentDrawable:atTime:", detail);
 }
-- (void)commit { caller(kind, "commit", ""); }
-- (void)waitUntilCompleted { caller(kind, "waitUntilCompleted", ""); }
-- (void)waitUntilScheduled { caller(kind, "waitUntilScheduled", ""); }
+/* H236ho: Metal's own -commit/-waitUntilCompleted are unusable here.  The base
+ * _MTLCommandBuffer keeps _queue only if -initWithQueue:retainedReferences:
+ * synchronousDebugMode: ran, and without a queue -commit is a silent no-op
+ * while -waitUntilCompleted blocks forever on _status (Metal 0x187AC6180), which
+ * is exactly the silent stop after the third render encoder.  The stub is
+ * therefore self-completing: it reports status 2 and returns immediately, so the
+ * frame pipeline keeps running and the draw path is exercised. */
+- (void)commit
+{
+    caller(kind, "commit", "self-completed");
+}
+
+- (void)waitUntilCompleted { caller(kind, "waitUntilCompleted", "immediate"); }
+- (void)waitUntilScheduled { caller(kind, "waitUntilScheduled", "immediate"); }
+- (unsigned long long)status { caller(kind, "status", "completed"); return 2; }
+- (id)error { return nil; }
+- (id)device { return gDeviceInstance; }
+- (id)commandQueue { return gDeviceInstance ? (id) gQueueInstance : nil; }
 
 - (void)dealloc { caller(kind, "dealloc", ""); }
 
@@ -729,8 +746,12 @@ static id trace_architecture(void)
 
 - (id)newCommandQueue
 {
-    caller("dev", "newCommandQueue", "queue=stub");
-    return [[A540TraceQueue alloc] init];
+    A540TraceQueue *queue = [[A540TraceQueue alloc] init];
+    gQueueInstance = queue;
+    char detail[64];
+    snprintf(detail, sizeof detail, "process=%s", [[[NSProcessInfo processInfo] processName] UTF8String]);
+    caller("dev", "newCommandQueue", detail);
+    return queue;
 }
 
 - (id)newCommandQueueWithMaxCommandBufferCount:(unsigned long long)count

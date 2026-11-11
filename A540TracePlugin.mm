@@ -281,7 +281,55 @@ static id trace_object_of(const char *className, const char *kind);
 @interface A540TraceQueue : NSObject
 @end
 
+/* Private initialiser of _MTLCommandBuffer (Metal 0x187A7C318): the only place
+ * that writes _queue, without which -commit is a silent no-op. */
+@interface NSObject (A540TraceCommandBufferInit)
+- (id)initWithQueue:(id)queue retainedReferences:(BOOL)retained synchronousDebugMode:(BOOL)synchronous;
+@end
+
 @implementation A540TraceQueue
+
+/** H236hq: the base _MTLCommandBuffer writes _queue only in
+ *  -initWithQueue:retainedReferences:synchronousDebugMode: (Metal 0x187A7C318);
+ *  without it -commit/-enqueue are silent no-ops and -waitUntilCompleted waits
+ *  forever (0x187AC6180).  The queue hands out buffers created through that
+ *  initialiser and answers the two messages the base -commit sends. */
+- (id)commandBuffer
+{
+    /* H236hq: the private initialiser dereferences Metal state at +0x30 that only
+     * a real _MTLCommandBuffer owns, so calling it on a runtime subclass
+     * segfaults (addr=0x30 right after this method).  The self-completing stub
+     * that kept ho's composition path alive is therefore kept; -commit's
+     * semantics can only be exercised once a real buffer exists. */
+    id buffer = trace_object_of("_MTLCommandBuffer", "cmdbuf");
+    caller("queue", "commandBuffer", "self-completing");
+    return buffer;
+}
+
+- (void)enqueueCommandBuffer:(id)buffer
+{
+    caller("queue", "enqueueCommandBuffer:", buffer ? "buffer=1" : "buffer=0");
+}
+
+- (void)commitCommandBuffer:(id)buffer wake:(BOOL)wake
+{
+    caller("queue", "commitCommandBuffer:wake:", wake ? "wake=1" : "wake=0");
+    if ([buffer respondsToSelector:@selector(commandBufferDidComplete:startTime:completionTime:error:)])
+        [self commandBufferDidComplete:buffer startTime:0 completionTime:0 error:nil];
+}
+
+/* Signature confirmed from Metal 0x187A8A380: the two times arrive in x3/x4,
+ * i.e. uint64_t, not double. */
+- (void)commandBufferDidComplete:(id)buffer
+                       startTime:(unsigned long long)start
+                  completionTime:(unsigned long long)completion
+                           error:(id)error
+{
+    char detail[96];
+    snprintf(detail, sizeof detail, "buffer=%d start=%llu end=%llu",
+             buffer ? 1 : 0, start, completion);
+    caller("queue", "commandBufferDidComplete:", detail);
+}
 
 /** H236hl: Metal sends a stream of private void setters (setSubmissionQueue:,
  *  setCompletionQueue:, setGPUPriority:, …).  Answering one by letting
@@ -323,7 +371,6 @@ static id trace_object_of(const char *className, const char *kind);
     caller("queue", "doesNotRecognize:", sel_getName(selector));
 }
 
-- (id)commandBuffer { caller("queue", "commandBuffer", ""); return trace_object_of("_MTLCommandBuffer", "cmdbuf"); }
 - (id)newCommandBuffer { caller("queue", "newCommandBuffer", ""); return trace_object_of("_MTLCommandBuffer", "cmdbuf"); }
 - (id)commandBufferWithDescriptor:(id)descriptor
 {

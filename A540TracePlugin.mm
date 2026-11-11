@@ -31,6 +31,11 @@
 #include <ucontext.h>
 #include <mach-o/dyld.h>
 #include <dlfcn.h>
+#include <objc/message.h>
+#include <mach/task_special_ports.h>
+/* <servers/bootstrap.h> is not in the iOS SDK; the call and the task's own
+ * bootstrap port are all this probe needs. */
+extern "C" kern_return_t bootstrap_look_up(mach_port_t bootstrapPort, const char *name, mach_port_t *service);
 #ifndef RTLD_DEFAULT
 #define RTLD_DEFAULT ((void *) -2)   /* _XOPEN_SOURCE hides Darwin's definition */
 #endif
@@ -85,6 +90,61 @@ static void value(const char *cls, const char *sel, const char *name, unsigned l
     char detail[64];
     snprintf(detail, sizeof detail, "%s=%llu", name, v);
     caller(cls, sel, detail);
+}
+
+/* H236ht: the headless decision is two Objective-C return values inside
+ * backboardd (BKDisplayStartWindowServer 0x10003472c): +[CADisplay mainDisplay]
+ * and -[CAWindowServer displayWithDisplayId:].  Static analysis proved that none
+ * of the nine IOMobileFramebuffer selectors can change them; the list comes from
+ * the render server over "com.apple.CARenderServer".  Asking QuartzCore from here
+ * answers both open questions in one line: whether the bootstrap service exists,
+ * and how many displays the server publishes. */
+static void probe_displays(const char *why)
+{
+    mach_port_t service = MACH_PORT_NULL, bootstrap = MACH_PORT_NULL;
+    kern_return_t lookup = task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &bootstrap);
+    if (lookup == KERN_SUCCESS) lookup = bootstrap_look_up(bootstrap, "com.apple.CARenderServer", &service);
+    const unsigned portNumber = (unsigned) service;
+    if (service != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), service);
+    Class displayClass = NSClassFromString(@"CADisplay");
+    Class serverClass = NSClassFromString(@"CAWindowServer");
+    id mainDisplay = nil, displayList = nil, server = nil;
+    unsigned long long displayCount = 0, serverCount = 0;
+    const char *failure = NULL;
+    @try {
+        if (displayClass) {
+            mainDisplay = ((id (*)(id, SEL)) objc_msgSend)(displayClass, @selector(mainDisplay));
+            displayList = ((id (*)(id, SEL)) objc_msgSend)(displayClass, @selector(displays));
+            if (displayList) displayCount = ((unsigned long long (*)(id, SEL)) objc_msgSend)(displayList, @selector(count));
+        }
+        if (serverClass) {
+            server = ((id (*)(id, SEL)) objc_msgSend)(serverClass, @selector(serverIfRunning));
+            if (server) {
+                id list = ((id (*)(id, SEL)) objc_msgSend)(server, @selector(displays));
+                if (list) serverCount = ((unsigned long long (*)(id, SEL)) objc_msgSend)(list, @selector(count));
+            }
+        }
+    } @catch (id exception) {
+        failure = "exception";
+    }
+    char detail[180];
+    snprintf(detail, sizeof detail, "%s class=%d main=%d list=%llu server=%llu port=0x%x kr=0x%x%s",
+             why, displayClass ? 1 : 0, mainDisplay ? 1 : 0, displayCount, serverCount,
+             portNumber, (unsigned) lookup, failure ? failure : "");
+    caller("ca", "probe", detail);
+}
+
+static void schedule_display_probes(void)
+{
+    static bool scheduled;
+    if (scheduled) return;
+    scheduled = true;
+    for (double delay = 2.0; delay <= 50.0; delay += 16.0) {
+        const int64_t nanos = (int64_t) (delay * 1e9);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, nanos), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            probe_displays("timer");
+        });
+    }
 }
 
 /** H236hi: Metal's assertion fires with no message we can see (backboardd is a
@@ -897,6 +957,7 @@ static id trace_architecture(void)
         tested = true;
         gpu_selftest();
     }
+    schedule_display_probes();
     return self;
 }
 

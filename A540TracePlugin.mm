@@ -228,10 +228,14 @@ static bool connectAccelerator(void)
     return YES;
 }
 
+/** H236gx: answering YES to Apple1 sent Metal into a path only a real device
+ *  has and killed backboardd.  The stub now reports that it supports no GPU
+ *  family, so the renderer takes its compatibility branch and keeps asking
+ *  questions instead of dying. */
 - (BOOL)supportsFamily:(long long)family
 {
     value("dev", "supportsFamily:", "family", (unsigned long long) family);
-    return YES;
+    return NO;
 }
 
 - (unsigned long long)recommendedMaxWorkingSetSize { caller("dev", "recommendedMaxWorkingSetSize", ""); return 0; }

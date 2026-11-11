@@ -142,6 +142,29 @@ static void probe_displays(const char *why)
     /* H236hu: which displays the server publishes, by name.  mainDisplay is the
      * one called "LCD" (QuartzCore query_displays), so the names say whether the
      * panel really is in the list or only the external/TV entries are. */
+    /* H236id: the reference port's SpringBoard aborted in FBSDisplayMode validation with
+     * preferredScale == 0 while the hardware is 1080x1920, so the mode numbers our display publishes
+     * are a prime suspect here too.  KVC keeps this readable whatever the private classes are. */
+    if (!failure && displayList && displayCount) {
+        @try {
+            id entry = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(displayList, @selector(objectAtIndex:), 0ULL);
+            id mode = entry ? [entry valueForKey:@"currentMode"] : nil;
+            id preferred = entry ? [entry valueForKey:@"preferredMode"] : nil;
+            NSNumber *width = [mode valueForKey:@"width"], *height = [mode valueForKey:@"height"];
+            NSNumber *pixelWidth = [mode valueForKey:@"pixelWidth"], *pixelHeight = [mode valueForKey:@"pixelHeight"];
+            NSNumber *refresh = [mode valueForKey:@"refreshRate"];
+            NSNumber *preferredRefresh = [preferred valueForKey:@"refreshRate"];
+            NSNumber *scale = nil;
+            @try { scale = [entry valueForKey:@"pointScale"]; } @catch (id ignored) { scale = nil; }
+            snprintf(detail, sizeof detail, "mode %llux%llu px=%llux%llu hz=%s prefHz=%s scale=%s",
+                     width ? [width unsignedLongLongValue] : 0ULL, height ? [height unsignedLongLongValue] : 0ULL,
+                     pixelWidth ? [pixelWidth unsignedLongLongValue] : 0ULL, pixelHeight ? [pixelHeight unsignedLongLongValue] : 0ULL,
+                     refresh ? [[refresh stringValue] UTF8String] : "nil",
+                     preferredRefresh ? [[preferredRefresh stringValue] UTF8String] : "nil",
+                     scale ? [[scale stringValue] UTF8String] : "nil");
+            caller("ca", "mode", detail);
+        } @catch (id exception) { caller("ca", "mode", "exception"); }
+    }
     /* H236ic: +[CADisplay displays] answers with CADisplay objects (client side); the window-server
      * side objects are -[CAWindowServer displays], and the client/context counters live there. */
     if (!failure && server) {
@@ -216,7 +239,13 @@ static void read_springboard_log(void)
         NSPredicate *predicate = [NSPredicate predicateWithFormat:@"process == %@", @"SpringBoard"];
         id entries = ((id (*)(id, SEL, unsigned long long, id, id, NSError **)) objc_msgSend)(store,
             NSSelectorFromString(@"entriesEnumeratorWithOptions:position:predicate:error:"), 0ULL, position, predicate, &error);
-        if (!entries) { caller("sblog", "oslog", "no-enumerator"); return; }
+        if (!entries) {
+            char why[184];
+            snprintf(why, sizeof why, "no-enumerator %.140s",
+                     error ? [[error localizedDescription] UTF8String] : "no-error");
+            caller("sblog", "oslog", why);
+            return;
+        }
         char text[184];
         unsigned long long shown = 0, total = 0;
         for (id entry = ((id (*)(id, SEL)) objc_msgSend)(entries, @selector(nextObject)); entry && shown < 48;
@@ -234,8 +263,12 @@ static void read_springboard_log(void)
         }
         snprintf(text, sizeof text, "total=%llu shown=%llu", total, shown);
         caller("sblog", "oslog", text);
-    } @catch (id exception) {
-        caller("sblog", "oslog", "exception");
+    } @catch (NSException *exception) {
+        char text[184];
+        snprintf(text, sizeof text, "exception %s: %.120s",
+                 exception.name ? [exception.name UTF8String] : "?",
+                 exception.reason ? [exception.reason UTF8String] : "?");
+        caller("sblog", "oslog", text);
     }
 }
 

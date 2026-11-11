@@ -180,6 +180,35 @@ static void probe_displays(const char *why)
                      exception.reason ? [exception.reason UTF8String] : "?");
             caller("ca", "mode", detail);
         }
+        /* H236if: pixelWidth/pixelHeight are 0 while bounds are 1080x1920, which is what a display
+         * looks like when QuartzCore has no scale: the reference port's SpringBoard aborted on
+         * preferredScale == 0.  Ask MobileGestalt what it publishes and ask the display what it
+         * thinks its own scale and native size are. */
+        @try {
+            typedef float (*MGFloatAnswer)(const char *, float);
+            typedef int32_t (*MGIntAnswer)(const char *, int32_t);
+            static MGFloatAnswer floatAnswer;
+            static MGIntAnswer intAnswer;
+            if (!floatAnswer) {
+                void *gestalt = dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_NOW);
+                if (gestalt) {
+                    floatAnswer = (MGFloatAnswer) dlsym(gestalt, "MGGetFloat32Answer");
+                    intAnswer = (MGIntAnswer) dlsym(gestalt, "MGGetSInt32Answer");
+                }
+            }
+            const float scale = floatAnswer ? floatAnswer("MainScreenScale", 0.0f) : -1.0f;
+            const float staticScale = floatAnswer ? floatAnswer("MainScreenStaticScale", 0.0f) : -1.0f;
+            const int screenClass = intAnswer ? intAnswer("MainScreenClass", -1) : -1;
+            const int orientation = intAnswer ? intAnswer("MainScreenOrientation", -1) : -1;
+            id entry = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(displayList, @selector(objectAtIndex:), 0ULL);
+            double pointScale = -1.0;
+            const SEL pointScaleSel = NSSelectorFromString(@"pointScale");
+            if (entry && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(entry, @selector(respondsToSelector:), pointScaleSel))
+                pointScale = ((double (*)(id, SEL)) objc_msgSend)(entry, pointScaleSel);
+            snprintf(detail, sizeof detail, "mg scale=%.3f static=%.3f class=%d orientation=%d displayScale=%.3f",
+                     scale, staticScale, screenClass, orientation, pointScale);
+            caller("ca", "scale", detail);
+        } @catch (id ignored) { caller("ca", "scale", "exception"); }
     }
     /* H236ic: +[CADisplay displays] answers with CADisplay objects (client side); the window-server
      * side objects are -[CAWindowServer displays], and the client/context counters live there. */

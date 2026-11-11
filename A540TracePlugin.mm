@@ -142,6 +142,29 @@ static void probe_displays(const char *why)
     /* H236hu: which displays the server publishes, by name.  mainDisplay is the
      * one called "LCD" (QuartzCore query_displays), so the names say whether the
      * panel really is in the list or only the external/TV entries are. */
+    /* H236ic: +[CADisplay displays] answers with CADisplay objects (client side); the window-server
+     * side objects are -[CAWindowServer displays], and the client/context counters live there. */
+    if (!failure && server) {
+        @try {
+            id serverList = ((id (*)(id, SEL)) objc_msgSend)(server, @selector(displays));
+            id displayed = serverList ? ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(serverList, @selector(objectAtIndex:), 0ULL) : nil;
+            if (displayed) {
+                NSString *counters = nil;
+                for (NSString *selectorName in @[@"contexts", @"contextIds", @"clients", @"currentState"]) {
+                    SEL sel = NSSelectorFromString(selectorName);
+                    if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(displayed, @selector(respondsToSelector:), sel)) {
+                        id value = ((id (*)(id, SEL)) objc_msgSend)(displayed, sel);
+                        unsigned long long n = 0;
+                        if (value && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(value, @selector(respondsToSelector:), @selector(count)))
+                            n = ((unsigned long long (*)(id, SEL)) objc_msgSend)(value, @selector(count));
+                        counters = [NSString stringWithFormat:@"%@ %@=%llu", counters ?: @"", selectorName, n];
+                    }
+                }
+                snprintf(detail, sizeof detail, "server%s", counters ? [counters UTF8String] : " none");
+                caller("ca", "clients", detail);
+            }
+        } @catch (id ignored) { caller("ca", "clients", "exception"); }
+    }
     if (!failure && displayList) {
         const unsigned long long shown = displayCount < 6 ? displayCount : 6;
         for (unsigned long long index = 0; index < shown; ++index) {
@@ -163,32 +186,56 @@ static void probe_displays(const char *why)
                     }
                 } @catch (id ignored) { boundsText = nil; }
             }
-            if (index == 0) {
-                /* H236hz: whether any process ever connected to the window server for this display.
-                 * A zero here matches "no client submits a layer tree"; a non-zero one would move the
-                 * question into the compositor.  The selector is private, so it is asked for first. */
-                NSString *counters = nil;
-                @try {
-                    for (NSString *selectorName in @[@"contexts", @"contextIds", @"clients"]) {
-                        SEL sel = NSSelectorFromString(selectorName);
-                        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(item, @selector(respondsToSelector:), sel)) {
-                            id value = ((id (*)(id, SEL)) objc_msgSend)(item, sel);
-                            unsigned long long n = value ? ((unsigned long long (*)(id, SEL)) objc_msgSend)(value, @selector(count)) : 0;
-                            counters = [NSString stringWithFormat:@"%@ %@=%llu", counters ?: @"", selectorName, n];
-                        }
-                    }
-                } @catch (id ignored) { counters = nil; }
-                if (counters) {
-                    snprintf(detail, sizeof detail, "server%s", [counters UTF8String]);
-                    caller("ca", "clients", detail);
-                }
-            }
             snprintf(detail, sizeof detail, "list[%llu] name=%s device=%s bounds=%s",
                      index, displayName ? [displayName UTF8String] : "nil",
                      deviceName ? [deviceName UTF8String] : "nil",
                      boundsText ? [boundsText UTF8String] : "?");
             caller("ca", "display", detail);
         }
+    }
+}
+
+/* H236ic: SpringBoard's stderr goes nowhere we can see (it is a launchd job, not a tty), but the
+ * unified log keeps it and OSLogStore reads that back from any process.  This is the only way to
+ * learn where a relaunched SpringBoard stops without touching the kernel. */
+static void read_springboard_log(void)
+{
+    static bool once;
+    if (once) return;
+    once = true;
+    @try {
+        dlopen("/System/Library/Frameworks/OSLog.framework/OSLog", RTLD_NOW);
+        Class storeClass = NSClassFromString(@"OSLogStore");
+        if (!storeClass) { caller("sblog", "oslog", "no-class"); return; }
+        NSError *error = nil;
+        id store = ((id (*)(id, SEL, NSError **)) objc_msgSend)(storeClass,
+            NSSelectorFromString(@"localStoreAndReturnError:"), &error);
+        if (!store) { caller("sblog", "oslog", "no-store"); return; }
+        NSDate *since = [NSDate dateWithTimeIntervalSinceNow:-420];
+        id position = ((id (*)(id, SEL, id)) objc_msgSend)(store, NSSelectorFromString(@"positionWithDate:"), since);
+        NSPredicate *predicate = [NSPredicate predicateWithFormat:@"process == %@", @"SpringBoard"];
+        id entries = ((id (*)(id, SEL, unsigned long long, id, id, NSError **)) objc_msgSend)(store,
+            NSSelectorFromString(@"entriesEnumeratorWithOptions:position:predicate:error:"), 0ULL, position, predicate, &error);
+        if (!entries) { caller("sblog", "oslog", "no-enumerator"); return; }
+        char text[184];
+        unsigned long long shown = 0, total = 0;
+        for (id entry = ((id (*)(id, SEL)) objc_msgSend)(entries, @selector(nextObject)); entry && shown < 48;
+             entry = ((id (*)(id, SEL)) objc_msgSend)(entries, @selector(nextObject))) {
+            ++total;
+            SEL composed = NSSelectorFromString(@"composedMessage");
+            if (!((BOOL (*)(id, SEL, SEL)) objc_msgSend)(entry, @selector(respondsToSelector:), composed)) continue;
+            NSString *message = ((id (*)(id, SEL)) objc_msgSend)(entry, composed);
+            if (!message) continue;
+            const char *utf8 = [message UTF8String];
+            if (!utf8) continue;
+            snprintf(text, sizeof text, "%.150s", utf8);
+            caller("sblog", "sb", text);
+            ++shown;
+        }
+        snprintf(text, sizeof text, "total=%llu shown=%llu", total, shown);
+        caller("sblog", "oslog", text);
+    } @catch (id exception) {
+        caller("sblog", "oslog", "exception");
     }
 }
 
@@ -272,6 +319,9 @@ static void schedule_display_probes(void)
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (60.0 * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         restart_springboard("restart");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (30.0 * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            read_springboard_log();
+        });
         for (double delay = 12.0; delay <= 60.0; delay += 16.0) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                 probe_displays("after");

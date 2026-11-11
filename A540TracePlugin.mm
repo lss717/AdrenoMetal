@@ -148,22 +148,38 @@ static void probe_displays(const char *why)
     if (!failure && displayList && displayCount) {
         @try {
             id entry = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(displayList, @selector(objectAtIndex:), 0ULL);
-            id mode = entry ? [entry valueForKey:@"currentMode"] : nil;
-            id preferred = entry ? [entry valueForKey:@"preferredMode"] : nil;
-            NSNumber *width = [mode valueForKey:@"width"], *height = [mode valueForKey:@"height"];
-            NSNumber *pixelWidth = [mode valueForKey:@"pixelWidth"], *pixelHeight = [mode valueForKey:@"pixelHeight"];
-            NSNumber *refresh = [mode valueForKey:@"refreshRate"];
-            NSNumber *preferredRefresh = [preferred valueForKey:@"refreshRate"];
-            NSNumber *scale = nil;
-            @try { scale = [entry valueForKey:@"pointScale"]; } @catch (id ignored) { scale = nil; }
-            snprintf(detail, sizeof detail, "mode %llux%llu px=%llux%llu hz=%s prefHz=%s scale=%s",
-                     width ? [width unsignedLongLongValue] : 0ULL, height ? [height unsignedLongLongValue] : 0ULL,
-                     pixelWidth ? [pixelWidth unsignedLongLongValue] : 0ULL, pixelHeight ? [pixelHeight unsignedLongLongValue] : 0ULL,
-                     refresh ? [[refresh stringValue] UTF8String] : "nil",
-                     preferredRefresh ? [[preferredRefresh stringValue] UTF8String] : "nil",
-                     scale ? [[scale stringValue] UTF8String] : "nil");
+            const SEL currentMode = NSSelectorFromString(@"currentMode");
+            id mode = nil;
+            if (entry && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(entry, @selector(respondsToSelector:), currentMode))
+                mode = ((id (*)(id, SEL)) objc_msgSend)(entry, currentMode);
+            if (!mode) { caller("ca", "mode", "no-mode-object"); }
+            else {
+                /* CADisplayMode's getters, asked for one by one: the type of each is fixed but the
+                 * object may not implement all of them on every build. */
+                unsigned long long width = 0, height = 0, pixelWidth = 0, pixelHeight = 0;
+                double hz = 0;
+                for (NSString *name in @[@"width", @"height", @"pixelWidth", @"pixelHeight"]) {
+                    SEL sel = NSSelectorFromString(name);
+                    if (!((BOOL (*)(id, SEL, SEL)) objc_msgSend)(mode, @selector(respondsToSelector:), sel)) continue;
+                    const unsigned long long value = ((unsigned long long (*)(id, SEL)) objc_msgSend)(mode, sel);
+                    if ([name isEqualToString:@"width"]) width = value;
+                    else if ([name isEqualToString:@"height"]) height = value;
+                    else if ([name isEqualToString:@"pixelWidth"]) pixelWidth = value;
+                    else pixelHeight = value;
+                }
+                const SEL refresh = NSSelectorFromString(@"refreshRate");
+                if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(mode, @selector(respondsToSelector:), refresh))
+                    hz = ((double (*)(id, SEL)) objc_msgSend)(mode, refresh);
+                snprintf(detail, sizeof detail, "mode %llux%llu px=%llux%llu hz=%.3f",
+                         width, height, pixelWidth, pixelHeight, hz);
+                caller("ca", "mode", detail);
+            }
+        } @catch (NSException *exception) {
+            snprintf(detail, sizeof detail, "exception %.100s: %.60s",
+                     exception.name ? [exception.name UTF8String] : "?",
+                     exception.reason ? [exception.reason UTF8String] : "?");
             caller("ca", "mode", detail);
-        } @catch (id exception) { caller("ca", "mode", "exception"); }
+        }
     }
     /* H236ic: +[CADisplay displays] answers with CADisplay objects (client side); the window-server
      * side objects are -[CAWindowServer displays], and the client/context counters live there. */
@@ -231,8 +247,12 @@ static void read_springboard_log(void)
         Class storeClass = NSClassFromString(@"OSLogStore");
         if (!storeClass) { caller("sblog", "oslog", "no-class"); return; }
         NSError *error = nil;
-        id store = ((id (*)(id, SEL, NSError **)) objc_msgSend)(storeClass,
-            NSSelectorFromString(@"localStoreAndReturnError:"), &error);
+        /* This OS only carries +storeWithScope:error: (scope 0 = the system store, 1 = this process);
+         * the macOS-only +localStoreAndReturnError: is absent, which is what the first attempt hit. */
+        id store = nil;
+        SEL factory = NSSelectorFromString(@"storeWithScope:error:");
+        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(storeClass, @selector(respondsToSelector:), factory))
+            store = ((id (*)(id, SEL, long long, NSError **)) objc_msgSend)(storeClass, factory, 0LL, &error);
         if (!store) { caller("sblog", "oslog", "no-store"); return; }
         NSDate *since = [NSDate dateWithTimeIntervalSinceNow:-420];
         id position = ((id (*)(id, SEL, id)) objc_msgSend)(store, NSSelectorFromString(@"positionWithDate:"), since);

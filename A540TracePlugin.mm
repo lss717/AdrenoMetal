@@ -185,8 +185,10 @@ static void probe_displays(const char *why)
          * preferredScale == 0.  Ask MobileGestalt what it publishes and ask the display what it
          * thinks its own scale and native size are. */
         @try {
-            typedef float (*MGFloatAnswer)(const char *, float);
-            typedef int32_t (*MGIntAnswer)(const char *, int32_t);
+            /* The keys are CFStrings, not C strings: passing a C string makes the callee treat it as a
+             * CFStringRef and dereference it (SIGSEGV at 0x19c33ec14, twice, right after this probe). */
+            typedef float (*MGFloatAnswer)(CFStringRef, float);
+            typedef int32_t (*MGIntAnswer)(CFStringRef, int32_t);
             static MGFloatAnswer floatAnswer;
             static MGIntAnswer intAnswer;
             if (!floatAnswer) {
@@ -196,10 +198,10 @@ static void probe_displays(const char *why)
                     intAnswer = (MGIntAnswer) dlsym(gestalt, "MGGetSInt32Answer");
                 }
             }
-            const float scale = floatAnswer ? floatAnswer("MainScreenScale", 0.0f) : -1.0f;
-            const float staticScale = floatAnswer ? floatAnswer("MainScreenStaticScale", 0.0f) : -1.0f;
-            const int screenClass = intAnswer ? intAnswer("MainScreenClass", -1) : -1;
-            const int orientation = intAnswer ? intAnswer("MainScreenOrientation", -1) : -1;
+            const float scale = floatAnswer ? floatAnswer(CFSTR("MainScreenScale"), 0.0f) : -1.0f;
+            const float staticScale = floatAnswer ? floatAnswer(CFSTR("MainScreenStaticScale"), 0.0f) : -1.0f;
+            const int screenClass = intAnswer ? intAnswer(CFSTR("MainScreenClass"), -1) : -1;
+            const int orientation = intAnswer ? intAnswer(CFSTR("MainScreenOrientation"), -1) : -1;
             id entry = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(displayList, @selector(objectAtIndex:), 0ULL);
             double pointScale = -1.0;
             const SEL pointScaleSel = NSSelectorFromString(@"pointScale");

@@ -40,6 +40,7 @@ static uint32_t gSelector;
 static unsigned gSequence;
 static unsigned gBudget = 800;
 static bool gLoaded;
+static id gDeviceInstance;
 
 static bool connectAccelerator(void);
 
@@ -94,10 +95,63 @@ static bool connectAccelerator(void)
     return false;
 }
 
+/** H236gt: the abandon point is newCommandQueue, so the queue itself has to be
+ *  traced too.  It is an opaque object for Metal (a plugin builds both), and
+ *  every selector the renderer sends that is not implemented is reported. */
+@interface A540TraceQueue : NSObject
+@end
+
+@implementation A540TraceQueue
+
+- (void)doesNotRecognizeSelector:(SEL)selector
+{
+    caller("queue", "doesNotRecognize:", sel_getName(selector));
+}
+
+- (id)commandBuffer { caller("queue", "commandBuffer", ""); return nil; }
+- (id)newCommandBuffer { caller("queue", "newCommandBuffer", ""); return nil; }
+- (id)commandBufferWithDescriptor:(id)descriptor
+{
+    caller("queue", "commandBufferWithDescriptor:", descriptor ? "descriptor=1" : "descriptor=0");
+    return nil;
+}
+- (void)setLabel:(id)label { caller("queue", "setLabel:", label ? "label=1" : "label=0"); }
+- (id)device { caller("queue", "device", ""); return gDeviceInstance; }
+- (unsigned long long)maxCommandBufferCount { caller("queue", "maxCommandBufferCount", ""); return 64; }
+/** H236gv: after -setLabel: Metal hands the queue its IO submission queue
+ *  through this private setter; returning nil here (unimplemented) is exactly
+ *  where it gave up.  The argument is recorded, nothing else. */
+- (void)setSubmissionQueue:(id)submission
+{
+    caller("queue", "setSubmissionQueue:", submission ? "submission=1" : "submission=0");
+}
+
+/** H236gw: the renderer installs the queue's IO mailboxes one setter at a time
+ *  (submission queue, then completion queue); each unimplemented one ends the
+ *  attempt.  Every void setter is accepted and recorded in one place. */
+- (void)setCompletionQueue:(id)completion
+{
+    caller("queue", "setCompletionQueue:", completion ? "completion=1" : "completion=0");
+}
+
+- (void)setCommandBufferQueue:(id)value { caller("queue", "setCommandBufferQueue:", value ? "value=1" : "value=0"); }
+- (void)setPriority:(id)value { caller("queue", "setPriority:", value ? "value=1" : "value=0"); }
+- (void)setPurgeableState:(id)value { caller("queue", "setPurgeableState:", value ? "value=1" : "value=0"); }
+
+- (void)insertDebugCaptureBoundary { caller("queue", "insertDebugCaptureBoundary", ""); }
+- (void)dealloc { caller("queue", "dealloc", ""); }
+
+@end
+
 @interface A540TraceDevice : _MTLDevice
 @end
 
 @implementation A540TraceDevice
+
+/** H236gu: an empty featureProfile dictionary makes Metal reject the device
+ *  before it asks anything else (gt), so the selector is left unimplemented:
+ *  it reaches -doesNotRecognizeSelector:, returns nil, and Metal carries on to
+ *  -maxBufferLength and -newCommandQueue (gs). */
 
 /** Runs when the image is loaded: the only proof that the bundle was accepted.
  *  It must not call the ABI (+load did, and backboardd aborted each time). */
@@ -155,6 +209,7 @@ static bool connectAccelerator(void)
     // H236gm showed that handing this instance back aborts Metal's registration;
     // H236gs adds the MTLDeviceSPI conformance the assertion asks for, so the
     // instance is offered again and the inventory follows if it is accepted.
+    gDeviceInstance = self;
     caller("dev", "initWithAcceleratorPort:", "device=returned");
     return self;
 }
@@ -184,8 +239,8 @@ static bool connectAccelerator(void)
 
 - (id)newCommandQueue
 {
-    caller("dev", "newCommandQueue", "");
-    return nil;
+    caller("dev", "newCommandQueue", "queue=stub");
+    return [[A540TraceQueue alloc] init];
 }
 
 - (id)newCommandQueueWithMaxCommandBufferCount:(unsigned long long)count

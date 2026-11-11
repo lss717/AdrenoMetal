@@ -30,6 +30,10 @@
 #include <signal.h>
 #include <ucontext.h>
 #include <mach-o/dyld.h>
+#include <dlfcn.h>
+#ifndef RTLD_DEFAULT
+#define RTLD_DEFAULT ((void *) -2)   /* _XOPEN_SOURCE hides Darwin's definition */
+#endif
 
 #include "NativeAdrenoABI.h"
 
@@ -152,16 +156,21 @@ static bool connectAccelerator(void)
  *  (backboardd), under its sandbox.  The sequence mirrors the userspace test
  *  that runs from the probe daemon, but every step reports its own failure so
  *  the kernel log shows exactly where it stops. */
-static int abi_call(uint32_t method, const void *input, size_t inputSize, void *output, size_t outputSize)
+static uint32_t abi_call_rc(uint32_t method, const void *input, size_t inputSize, void *output, size_t outputSize)
 {
     struct { uint32_t magic, method; uint8_t payload[512]; } request;
-    if (inputSize > sizeof request.payload) return -1;
+    if (inputSize > sizeof request.payload) return 0xe00002c2u; /* kIOReturnBadArgument */
     memset(&request, 0, sizeof request);
     request.magic = kTunnelMagic;
     request.method = method;
     if (inputSize) memcpy(request.payload, input, inputSize);
     size_t size = outputSize;
-    return IOConnectCallStructMethod(gConnection, gSelector, &request, 8 + inputSize, output, &size) == KERN_SUCCESS ? 0 : -1;
+    return (uint32_t) IOConnectCallStructMethod(gConnection, gSelector, &request, 8 + inputSize, output, &size);
+}
+
+static int abi_call(uint32_t method, const void *input, size_t inputSize, void *output, size_t outputSize)
+{
+    return abi_call_rc(method, input, inputSize, output, outputSize) == KERN_SUCCESS ? 0 : -1;
 }
 
 static uint32_t pm4_type7(uint32_t opcode, uint32_t count)
@@ -419,6 +428,8 @@ struct TraceStorage {
     unsigned long long length, width, height, pixelFormat, textureType, storageMode;
     unsigned long long mipmaps, samples, usage, arrayLength, gpuAddress;
     void *contents;
+    void *iosurface;             /* H236hs: the drawable's surface, when there is one */
+    unsigned long long plane, bytesPerRow;
 };
 
 static struct TraceStorage gStorage[512];
@@ -433,6 +444,99 @@ static struct TraceStorage *storage_for(id object, bool create)
     memset(entry, 0, sizeof *entry);
     entry->object = object;
     return entry;
+}
+
+/* H236hs: the presentable surface.  CoreAnimation hands the render server a
+ * drawable only through -newTextureWithDescriptor:iosurface:plane:, and the
+ * surface behind it is what a present would put on the panel.  The plugin
+ * records the surface on the texture it made, and offers it once to the display
+ * hand-off (boot-arg sheng-fb-gpu=1) so the log answers whether the plugin can
+ * reach the panel at all.  The IOSurface queries are resolved by name: this
+ * bundle links no IOSurface framework. */
+typedef struct __IOSurface *A540Surface;
+typedef size_t (*A540SurfaceQuery)(A540Surface);
+
+static A540SurfaceQuery gSurfaceWidth, gSurfaceHeight, gSurfaceRowBytes, gSurfaceAllocSize;
+static void *(*gSurfaceBase)(A540Surface);
+static uint32_t (*gSurfaceID)(A540Surface);
+
+static void load_surface_queries(void)
+{
+    static bool tried;
+    if (tried) return;
+    tried = true;
+    gSurfaceWidth = (A540SurfaceQuery) dlsym(RTLD_DEFAULT, "IOSurfaceGetWidth");
+    gSurfaceHeight = (A540SurfaceQuery) dlsym(RTLD_DEFAULT, "IOSurfaceGetHeight");
+    gSurfaceRowBytes = (A540SurfaceQuery) dlsym(RTLD_DEFAULT, "IOSurfaceGetBytesPerRow");
+    gSurfaceAllocSize = (A540SurfaceQuery) dlsym(RTLD_DEFAULT, "IOSurfaceGetAllocSize");
+    gSurfaceBase = (void *(*)(A540Surface)) dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddress");
+    gSurfaceID = (uint32_t (*)(A540Surface)) dlsym(RTLD_DEFAULT, "IOSurfaceGetID");
+}
+
+/* One attempt per boot: whether the display driver's GPU hand-off answers on this
+ * connection decides whether a presented surface can reach the panel from here. */
+static void offer_surface_to_display(void *surface, const char *sel)
+{
+    if (!surface) { caller("cmdbuf", sel, "display=no-surface"); return; }
+    static bool probed;
+    if (probed) return;
+    probed = true;
+    load_surface_queries();
+    if (!gSurfaceBase || !gSurfaceWidth || !gSurfaceHeight || !gSurfaceRowBytes || !gSurfaceAllocSize) {
+        caller("cmdbuf", sel, "display=no-iosurface-api");
+        return;
+    }
+    struct { uint32_t version, format; uint64_t width, height, stride, bytes; } mode;
+    memset(&mode, 0, sizeof mode);
+    uint32_t status = abi_call_rc(0x7000, NULL, 0, &mode, sizeof mode);
+    char detail[180];
+    if (status) {
+        snprintf(detail, sizeof detail, "display=no-handoff rc=0x%x", status);
+        caller("cmdbuf", sel, detail);
+        return;
+    }
+    snprintf(detail, sizeof detail, "display mode=%ux%u stride=%llu bytes=%llu fmt=%u",
+             (unsigned) mode.width, (unsigned) mode.height, mode.stride, mode.bytes, mode.format);
+    caller("cmdbuf", sel, detail);
+    struct { uint64_t address, bytes; uint32_t width, height, stride, format; } present;
+    memset(&present, 0, sizeof present);
+    present.address = (uint64_t) (uintptr_t) gSurfaceBase((A540Surface) surface);
+    present.bytes = (uint64_t) gSurfaceAllocSize((A540Surface) surface);
+    present.width = (uint32_t) gSurfaceWidth((A540Surface) surface);
+    present.height = (uint32_t) gSurfaceHeight((A540Surface) surface);
+    present.stride = (uint32_t) gSurfaceRowBytes((A540Surface) surface);
+    present.format = 1;   /* NGP_BGRX8888 */
+    struct { uint64_t sequence, bytes; } transfer;
+    memset(&transfer, 0, sizeof transfer);
+    status = abi_call_rc(0x7001, &present, sizeof present, &transfer, sizeof transfer);
+    snprintf(detail, sizeof detail, "display present rc=0x%x seq=%llu bytes=%llu src=%ux%u stride=%u",
+             status, transfer.sequence, transfer.bytes, present.width, present.height, present.stride);
+    caller("cmdbuf", sel, detail);
+}
+
+/* The drawable is CoreAnimation's object: its texture is the surface's texture. */
+static void present_drawable(id drawable, const char *sel)
+{
+    char detail[180];
+    if (!drawable) { caller("cmdbuf", sel, "drawable=0"); return; }
+    id texture = [drawable respondsToSelector:@selector(texture)] ? [drawable texture] : nil;
+    void *surface = nil;
+    if (texture && [texture respondsToSelector:@selector(iosurface)])
+        surface = (void *) (uintptr_t) [texture iosurface];
+    load_surface_queries();
+    if (!surface) {
+        snprintf(detail, sizeof detail, "drawable=1 texture=%d surface=0", texture ? 1 : 0);
+        caller("cmdbuf", sel, detail);
+        return;
+    }
+    snprintf(detail, sizeof detail, "drawable=1 texture=%d surface=1 id=%u %llux%llu stride=%llu bytes=%llu",
+             texture ? 1 : 0, gSurfaceID ? gSurfaceID((A540Surface) surface) : 0,
+             gSurfaceWidth ? (unsigned long long) gSurfaceWidth((A540Surface) surface) : 0,
+             gSurfaceHeight ? (unsigned long long) gSurfaceHeight((A540Surface) surface) : 0,
+             gSurfaceRowBytes ? (unsigned long long) gSurfaceRowBytes((A540Surface) surface) : 0,
+             gSurfaceAllocSize ? (unsigned long long) gSurfaceAllocSize((A540Surface) surface) : 0);
+    caller("cmdbuf", sel, detail);
+    offer_surface_to_display(surface, sel);
 }
 
 @interface A540TraceObject : NSObject
@@ -457,6 +561,11 @@ static struct TraceStorage *storage_for(id object, bool create)
 - (unsigned long long)length { struct TraceStorage *e = storage_for(self, false); return e ? e->length : 0; }
 - (unsigned long long)gpuAddress { struct TraceStorage *e = storage_for(self, false); return e ? e->gpuAddress : 0; }
 - (void *)contents { struct TraceStorage *e = storage_for(self, false); return e ? e->contents : NULL; }
+- (void *)iosurface { struct TraceStorage *e = storage_for(self, false); return e ? e->iosurface : NULL; }
+- (unsigned long long)iosurfacePlane { struct TraceStorage *e = storage_for(self, false); return e ? e->plane : 0; }
+- (unsigned long long)bytesPerRow { struct TraceStorage *e = storage_for(self, false); return e ? e->bytesPerRow : 0; }
+- (unsigned long long)bufferOffset { return 0; }
+- (unsigned long long)bufferBytesPerRow { struct TraceStorage *e = storage_for(self, false); return e ? e->bytesPerRow : 0; }
 
 /** H236hl: Metal sends a stream of private void setters (setSubmissionQueue:,
  *  setCompletionQueue:, setGPUPriority:, …).  Answering one by letting
@@ -528,12 +637,28 @@ static struct TraceStorage *storage_for(id object, bool create)
 }
 
 - (void)endEncoding { caller(kind, "endEncoding", ""); }
-- (void)presentDrawable:(id)drawable { caller(kind, "presentDrawable:", drawable ? "drawable=1" : "drawable=0"); }
+/** H236hs: the present point.  The drawable's surface is recorded, offered to
+ *  the display hand-off, and the frame is completed through the queue, whose
+ *  -commandBufferDidComplete: takes uint64_t times (Metal 0x187A8A380: x3/x4). */
+- (void)presentDrawable:(id)drawable
+{
+    present_drawable(drawable, "presentDrawable:");
+    if (gQueueInstance && [gQueueInstance respondsToSelector:@selector(commandBufferDidComplete:startTime:completionTime:error:)])
+        [gQueueInstance commandBufferDidComplete:self startTime:0 completionTime:0 error:nil];
+}
 - (void)presentDrawable:(id)drawable atTime:(double)time
 {
     char detail[64];
-    snprintf(detail, sizeof detail, "drawable=%d at=%llu", drawable ? 1 : 0, (unsigned long long) (time * 1e9));
+    snprintf(detail, sizeof detail, "at=%llu", (unsigned long long) (time * 1e9));
     caller(kind, "presentDrawable:atTime:", detail);
+    [self presentDrawable:drawable];
+}
+- (void)presentDrawable:(id)drawable afterMinimumDuration:(double)duration
+{
+    char detail[64];
+    snprintf(detail, sizeof detail, "after=%llu", (unsigned long long) (duration * 1e9));
+    caller(kind, "presentDrawable:afterMinimumDuration:", detail);
+    [self presentDrawable:drawable];
 }
 /* H236ho: Metal's own -commit/-waitUntilCompleted are unusable here.  The base
  * _MTLCommandBuffer keeps _queue only if -initWithQueue:retainedReferences:
@@ -858,20 +983,31 @@ static id trace_architecture(void)
     return buffer;
 }
 
+/* H236hs: both texture entry points record the same descriptor fields; the
+ * surface one also keeps the surface, which is what -iosurface answers and what
+ * a present would hand to the display. */
+static void capture_texture(id texture, id descriptor)
+{
+    struct TraceStorage *store = storage_for(texture, true);
+    if (!store || !descriptor) return;
+    MTLTextureDescriptor *d = (MTLTextureDescriptor *) descriptor;
+    store->width = [d width];
+    store->height = [d height];
+    store->pixelFormat = [d pixelFormat];
+    store->textureType = [d textureType];
+    store->storageMode = [d storageMode];
+    store->mipmaps = [d mipmapLevelCount];
+    store->samples = [d sampleCount];
+    store->usage = [d usage];
+    store->arrayLength = [d arrayLength];
+}
+
 - (id)newTextureWithDescriptor:(id)descriptor
 {
     id texture = trace_object_of("_MTLTexture", "texture");
     struct TraceStorage *store = storage_for(texture, true);
     if (store && descriptor) {
-        store->width = [(MTLTextureDescriptor *) descriptor width];
-        store->height = [(MTLTextureDescriptor *) descriptor height];
-        store->pixelFormat = [(MTLTextureDescriptor *) descriptor pixelFormat];
-        store->textureType = [(MTLTextureDescriptor *) descriptor textureType];
-        store->storageMode = [(MTLTextureDescriptor *) descriptor storageMode];
-        store->mipmaps = [(MTLTextureDescriptor *) descriptor mipmapLevelCount];
-        store->samples = [(MTLTextureDescriptor *) descriptor sampleCount];
-        store->usage = [(MTLTextureDescriptor *) descriptor usage];
-        store->arrayLength = [(MTLTextureDescriptor *) descriptor arrayLength];
+        capture_texture(texture, descriptor);
         char detail[128];
         snprintf(detail, sizeof detail, "%llux%llu fmt=%llu type=%llu samples=%llu mips=%llu usage=0x%llx",
                  store->width, store->height, store->pixelFormat, store->textureType,
@@ -879,6 +1015,30 @@ static id trace_architecture(void)
         caller("dev", "newTextureWithDescriptor:", detail);
     } else {
         caller("dev", "newTextureWithDescriptor:", descriptor ? "no-storage" : "descriptor=0");
+    }
+    return texture;
+}
+
+/** H236hs: the drawable's texture.  CoreAnimation reaches this only with a
+ *  surface it owns; until it does, no drawable exists and nothing can be
+ *  presented.  The surface is recorded so -iosurface answers it and a present
+ *  can offer it to the display. */
+- (id)newTextureWithDescriptor:(id)descriptor iosurface:(void *)surface plane:(NSUInteger)plane
+{
+    id texture = trace_object_of("_MTLTexture", "texture");
+    struct TraceStorage *store = storage_for(texture, true);
+    if (store) {
+        capture_texture(texture, descriptor);
+        store->iosurface = surface;
+        store->plane = plane;
+        load_surface_queries();
+        char detail[180];
+        snprintf(detail, sizeof detail, "iosurface %llux%llu fmt=%llu plane=%llu id=%u stride=%llu bytes=%llu",
+                 store->width, store->height, store->pixelFormat, store->plane,
+                 (surface && gSurfaceID) ? gSurfaceID((A540Surface) surface) : 0,
+                 (surface && gSurfaceRowBytes) ? (unsigned long long) gSurfaceRowBytes((A540Surface) surface) : 0,
+                 (surface && gSurfaceAllocSize) ? (unsigned long long) gSurfaceAllocSize((A540Surface) surface) : 0);
+        caller("dev", "newTextureWithDescriptor:iosurface:plane:", detail);
     }
     return texture;
 }

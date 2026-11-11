@@ -33,6 +33,12 @@
 #include <dlfcn.h>
 #include <objc/message.h>
 #include <mach/task_special_ports.h>
+#include <signal.h>
+/* <libproc.h> is not in the iOS SDK; these two libSystem calls are all the pid
+ * scan needs. */
+extern "C" int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
+extern "C" int proc_name(int pid, void *buffer, uint32_t buffersize);
+#define A540_PROC_ALL_PIDS 1
 /* <servers/bootstrap.h> is not in the iOS SDK; the call and the task's own
  * bootstrap port are all this probe needs. */
 extern "C" kern_return_t bootstrap_look_up(mach_port_t bootstrapPort, const char *name, mach_port_t *service);
@@ -132,6 +138,57 @@ static void probe_displays(const char *why)
              why, displayClass ? 1 : 0, mainDisplay ? 1 : 0, displayCount, serverCount,
              portNumber, (unsigned) lookup, failure ? failure : "");
     caller("ca", "probe", detail);
+    /* H236hu: which displays the server publishes, by name.  mainDisplay is the
+     * one called "LCD" (QuartzCore query_displays), so the names say whether the
+     * panel really is in the list or only the external/TV entries are. */
+    if (!failure && displayList) {
+        const unsigned long long shown = displayCount < 6 ? displayCount : 6;
+        for (unsigned long long index = 0; index < shown; ++index) {
+            id item = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(displayList, @selector(objectAtIndex:), index);
+            if (!item) continue;
+            NSString *displayName = ((id (*)(id, SEL)) objc_msgSend)(item, @selector(name));
+            NSString *deviceName = nil;
+            if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(item, @selector(respondsToSelector:), @selector(deviceName)))
+                deviceName = ((id (*)(id, SEL)) objc_msgSend)(item, @selector(deviceName));
+            snprintf(detail, sizeof detail, "list[%llu] name=%s device=%s",
+                     index, displayName ? [displayName UTF8String] : "nil",
+                     deviceName ? [deviceName UTF8String] : "nil");
+            caller("ca", "display", detail);
+        }
+    }
+}
+
+/* H236hu: ordering experiment.  SpringBoard launched at 126.5 s while backboardd
+ * only exec'd at 142.8 s and opened the display at 150.5 s, so SpringBoard asked
+ * for the main CADisplay before the render server existed (query_displays returns
+ * an empty list with no log when CARenderServerGetServerPort is 0).  If the empty
+ * list is cached, restarting SpringBoard now that the server publishes six
+ * displays is the cheapest possible test: a relaunched SpringBoard either gets a
+ * display and starts submitting layers, or it does not. */
+static int find_process(const char *name)
+{
+    const int capacity = 512;
+    pid_t pids[capacity];
+    const int bytes = proc_listpids(A540_PROC_ALL_PIDS, 0, pids, (int) sizeof pids);
+    if (bytes <= 0) return 0;
+    const int count = bytes / (int) sizeof(pid_t);
+    for (int index = 0; index < count; ++index) {
+        if (pids[index] <= 0) continue;
+        char comm[64];
+        memset(comm, 0, sizeof comm);
+        if (proc_name(pids[index], comm, (uint32_t) sizeof comm) > 0 && !strcmp(comm, name)) return pids[index];
+    }
+    return 0;
+}
+
+static void restart_springboard(const char *why)
+{
+    const int pid = find_process("SpringBoard");
+    char detail[96];
+    if (pid <= 0) { snprintf(detail, sizeof detail, "%s springboard=none", why); caller("ca", "restart", detail); return; }
+    const int status = kill(pid, SIGTERM);
+    snprintf(detail, sizeof detail, "%s pid=%d kill=%d", why, pid, status);
+    caller("ca", "restart", detail);
 }
 
 static void schedule_display_probes(void)
@@ -145,6 +202,14 @@ static void schedule_display_probes(void)
             probe_displays("timer");
         });
     }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (60.0 * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        restart_springboard("restart");
+        for (double delay = 12.0; delay <= 60.0; delay += 16.0) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                probe_displays("after");
+            });
+        }
+    });
 }
 
 /** H236hi: Metal's assertion fires with no message we can see (backboardd is a

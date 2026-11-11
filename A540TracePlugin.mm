@@ -29,6 +29,11 @@
 #include <stdlib.h>   /* getprogname */
 #include <mach/mach.h>
 #include <signal.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#ifndef O_NOFOLLOW
+#define O_NOFOLLOW 0x0100   /* Darwin; _XOPEN_SOURCE hides it */
+#endif
 #include <ucontext.h>
 #include <mach-o/dyld.h>
 #include <dlfcn.h>
@@ -180,37 +185,39 @@ static void probe_displays(const char *why)
                      exception.reason ? [exception.reason UTF8String] : "?");
             caller("ca", "mode", detail);
         }
-        /* H236if: pixelWidth/pixelHeight are 0 while bounds are 1080x1920, which is what a display
-         * looks like when QuartzCore has no scale: the reference port's SpringBoard aborted on
-         * preferredScale == 0.  Ask MobileGestalt what it publishes and ask the display what it
-         * thinks its own scale and native size are. */
+        /* H236ih: ask only what is safe to ask.  MobileGestalt is not usable from this process: a C-string
+         * key segfaults, a CFString key blocks the calling thread forever, so scale comes from QuartzCore
+         * alone and the driver's published properties are read through IOKit. */
         @try {
-            /* The keys are CFStrings, not C strings: passing a C string makes the callee treat it as a
-             * CFStringRef and dereference it (SIGSEGV at 0x19c33ec14, twice, right after this probe). */
-            typedef float (*MGFloatAnswer)(CFStringRef, float);
-            typedef int32_t (*MGIntAnswer)(CFStringRef, int32_t);
-            static MGFloatAnswer floatAnswer;
-            static MGIntAnswer intAnswer;
-            if (!floatAnswer) {
-                void *gestalt = dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_NOW);
-                if (gestalt) {
-                    floatAnswer = (MGFloatAnswer) dlsym(gestalt, "MGGetFloat32Answer");
-                    intAnswer = (MGIntAnswer) dlsym(gestalt, "MGGetSInt32Answer");
-                }
-            }
-            const float scale = floatAnswer ? floatAnswer(CFSTR("MainScreenScale"), 0.0f) : -1.0f;
-            const float staticScale = floatAnswer ? floatAnswer(CFSTR("MainScreenStaticScale"), 0.0f) : -1.0f;
-            const int screenClass = intAnswer ? intAnswer(CFSTR("MainScreenClass"), -1) : -1;
-            const int orientation = intAnswer ? intAnswer(CFSTR("MainScreenOrientation"), -1) : -1;
             id entry = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(displayList, @selector(objectAtIndex:), 0ULL);
             double pointScale = -1.0;
             const SEL pointScaleSel = NSSelectorFromString(@"pointScale");
             if (entry && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(entry, @selector(respondsToSelector:), pointScaleSel))
                 pointScale = ((double (*)(id, SEL)) objc_msgSend)(entry, pointScaleSel);
-            snprintf(detail, sizeof detail, "mg scale=%.3f static=%.3f class=%d orientation=%d displayScale=%.3f",
-                     scale, staticScale, screenClass, orientation, pointScale);
+            snprintf(detail, sizeof detail, "displayScale=%.3f", pointScale);
             caller("ca", "scale", detail);
         } @catch (id ignored) { caller("ca", "scale", "exception"); }
+        /* H236ih: whether the display driver published a default framebuffer surface.  A surface is what
+         * gives the compositor something to draw into; its absence also explains pixelWidth == 0.
+         * Reading the service's properties needs no driver call and no kernel change. */
+        @try {
+            io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NativeLegacyDisplay"));
+            if (!service) { caller("ca", "props", "no-service"); }
+            else {
+                CFMutableDictionaryRef properties = NULL;
+                if (IORegistryEntryCreateCFProperties(service, &properties, kCFAllocatorDefault, 0) != KERN_SUCCESS || !properties) {
+                    caller("ca", "props", "no-properties");
+                } else {
+                    NSDictionary *values = (__bridge_transfer NSDictionary *) properties;
+                    const bool surface = values[@"default_fb_surface"] != nil;
+                    NSString *names = [[values.allKeys sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@","];
+                    snprintf(detail, sizeof detail, "n=%llu surface=%d keys=%.120s",
+                             (unsigned long long) values.count, surface ? 1 : 0, names ? [names UTF8String] : "");
+                    caller("ca", "props", detail);
+                }
+                IOObjectRelease(service);
+            }
+        } @catch (id ignored) { caller("ca", "props", "exception"); }
     }
     /* H236ic: +[CADisplay displays] answers with CADisplay objects (client side); the window-server
      * side objects are -[CAWindowServer displays], and the client/context counters live there. */
@@ -268,6 +275,7 @@ static void probe_displays(const char *why)
 /* H236ic: SpringBoard's stderr goes nowhere we can see (it is a launchd job, not a tty), but the
  * unified log keeps it and OSLogStore reads that back from any process.  This is the only way to
  * learn where a relaunched SpringBoard stops without touching the kernel. */
+__attribute__((unused))
 static void read_springboard_log(void)
 {
     static bool once;
@@ -321,6 +329,187 @@ static void read_springboard_log(void)
                  exception.reason ? [exception.reason UTF8String] : "?");
         caller("sblog", "oslog", text);
     }
+}
+
+/* H236ii: MobileGestalt cannot be called from this process (a C-string key segfaults, a CFString key
+ * blocks the thread), but its persistent cache is an ordinary file on the Data volume and root can read
+ * it.  The reference port found that a cached screen record with scale 0 keeps both the mode's
+ * preferredScale and the primary display's pointScale at 0 even after the device tree says 3, so the
+ * question "what does MG believe" is answered by looking at the file, not by calling MG. */
+static void probe_gestalt_cache(void)
+{
+    static bool once;
+    if (once) return;
+    once = true;
+    NSFileManager *manager = [NSFileManager defaultManager];
+    NSArray *paths = @[
+        @"/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache",
+        @"/private/var/db/com.apple.mobilegestalt.plist",
+        @"/private/var/mobile/Library/Preferences/com.apple.MobileGestalt.plist",
+        @"/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches",
+    ];
+    char detail[184];
+    for (NSString *path in paths) {
+        const char *shown = [path.lastPathComponent UTF8String];
+        BOOL directory = NO;
+        if (![manager fileExistsAtPath:path isDirectory:&directory]) {
+            snprintf(detail, sizeof detail, "absent %.140s", [path UTF8String]);
+            caller("mgcache", shown ? shown : "?", detail);
+            continue;
+        }
+        if (directory) {
+            NSArray *items = [manager contentsOfDirectoryAtPath:path error:nil];
+            NSString *list = items ? [items componentsJoinedByString:@","] : @"?";
+            snprintf(detail, sizeof detail, "dir n=%llu %.120s", (unsigned long long) items.count,
+                     list ? [list UTF8String] : "");
+            caller("mgcache", shown ? shown : "?", detail);
+            for (NSString *item in items ?: @[]) {
+                NSString *child = [path stringByAppendingPathComponent:item];
+                NSDictionary *attributes = [manager attributesOfItemAtPath:child error:nil];
+                if (!attributes) continue;
+                snprintf(detail, sizeof detail, "item %s %.100s bytes=%llu",
+                         [[attributes fileType] UTF8String] ?: "?", [item UTF8String],
+                         (unsigned long long) [attributes fileSize]);
+                caller("mgcache", shown ? shown : "?", detail);
+            }
+        } else {
+            NSDictionary *attributes = [manager attributesOfItemAtPath:path error:nil];
+            snprintf(detail, sizeof detail, "file bytes=%llu", (unsigned long long) [attributes fileSize]);
+            caller("mgcache", shown ? shown : "?", detail);
+        }
+    }
+}
+
+/* H236ip: SpringBoard's only abnormal wait is a synchronous Mach reply (mach_msg2_trap, §45.77) and
+ * no daemon shows an abnormal kernel wait (§45.80), so the question is whether the service it is
+ * calling is registered at all.  A missing bootstrap name answers that without touching the kernel:
+ * BOOTSTRAP_UNKNOWN_SERVICE (0x44e) means the name was never registered in this namespace. */
+static void probe_services(void)
+{
+    static bool once;
+    if (once) return;
+    once = true;
+    static const char *const names[] = {
+        "com.apple.runningboard",
+        "com.apple.lsd.xpc",
+        "com.apple.lsd.open",
+        "com.apple.lsd.installation",
+        "com.apple.lsd.personaobserver",
+        "com.apple.containermanagerd",
+        "com.apple.containermanagerd.system",
+        "com.apple.mobile.usermanagerd.xpc",
+        "com.apple.frontboard.systemappservices",
+        "com.apple.backboard.hid",
+        "com.apple.CARenderServer",
+        "com.apple.CoreDisplay",
+        "com.apple.system.logger",
+        "com.apple.mobile.keybagd",
+        "com.apple.springboard.services",
+        "com.apple.UIKit.keyboard-management-service",
+        "com.apple.distributed_notifications@1v3",
+    };
+    /* H236ir: the reference port's userland chain failed on the missing persona manifest, so report
+     * whether this Data volume has one (read-only: a stat, no container or persona call). */
+    {
+        static const char *const paths[] = {
+            "/private/var/keybags/persona.kb",
+            "/private/var/keybags",
+            "/private/var/db/com.apple.xpc.launchd/disabled.plist",
+            "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache",
+        };
+        struct stat info;
+        char pathDetail[128];
+        for (unsigned index = 0; index < sizeof paths / sizeof paths[0]; ++index) {
+            const int status = stat(paths[index], &info);
+            snprintf(pathDetail, sizeof pathDetail, "path %s rc=%d bytes=%lld", paths[index], status,
+                     status == 0 ? (long long) info.st_size : -1LL);
+            caller("svc", "file", pathDetail);
+        }
+    }
+    mach_port_t bootstrap = MACH_PORT_NULL;
+    if (task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &bootstrap) != KERN_SUCCESS) {
+        caller("svc", "bootstrap", "no-port");
+        return;
+    }
+    char detail[128];
+    for (unsigned index = 0; index < sizeof names / sizeof names[0]; ++index) {
+        mach_port_t port = MACH_PORT_NULL;
+        const kern_return_t status = bootstrap_look_up(bootstrap, names[index], &port);
+        if (port != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), port);
+        snprintf(detail, sizeof detail, "%s kr=0x%x", names[index], (unsigned) status);
+        caller("svc", "lookup", detail);
+    }
+}
+
+/* H236iq: com.apple.lsd is the one candidate that is not registered (0x44e) at ~220 s while lsd
+ * itself runs with runnable threads, and SpringBoard waits on a synchronous reply.  This samples it
+ * repeatedly so the log says whether the name ever appears, and when. */
+static void probe_lsd(unsigned round)
+{
+    static const char *const names[] = {
+        "com.apple.lsd",
+        "com.apple.lsd.mapdb",
+        "com.apple.lsd.modifydb",
+        "com.apple.iconservices",
+        "com.apple.iconservices.store",
+    };
+    mach_port_t bootstrap = MACH_PORT_NULL;
+    if (task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &bootstrap) != KERN_SUCCESS) return;
+    char detail[128];
+    for (unsigned index = 0; index < sizeof names / sizeof names[0]; ++index) {
+        mach_port_t port = MACH_PORT_NULL;
+        const kern_return_t status = bootstrap_look_up(bootstrap, names[index], &port);
+        if (port != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), port);
+        snprintf(detail, sizeof detail, "round=%u %s kr=0x%x", round, names[index], (unsigned) status);
+        caller("lsd", "lookup", detail);
+    }
+}
+
+/* H236is: the reference port (sagit, iOS 18) traced its userland stall to the missing initial
+ * persona manifest at /private/var/keybags/persona.kb: usermanagerd reported ENOENT and launchd kept
+ * respawning it, and backboardd waited in the native Sandbox container RPC.  Here the directory
+ * exists but the file does not (§45.81), and no candidate Mach service is missing, so this creates the
+ * same initial metadata — only when absent, never overwriting — and reports the result.  It is persona
+ * metadata, not a keybag secret. */
+static void fix_persona(void)
+{
+    static bool once;
+    if (once) return;
+    once = true;
+    const char *directory = "/private/var/keybags";
+    const char *path = "/private/var/keybags/persona.kb";
+    struct stat info;
+    char detail[160];
+    if (stat(path, &info) == 0) {
+        snprintf(detail, sizeof detail, "exists bytes=%lld", (long long) info.st_size);
+        caller("persona", "present", detail);
+        return;
+    }
+    mkdir(directory, 0700);
+    NSDictionary *manifest = @{
+        @"UsePersonaManifestVersion": @1,
+        @"UsePersonaGenerationID": @1,
+        @"UserPersonaDictionary": @{},
+    };
+    NSError *error = nil;
+    NSData *encoded = [NSPropertyListSerialization dataWithPropertyList:manifest
+                                                                format:NSPropertyListBinaryFormat_v1_0
+                                                               options:0
+                                                                 error:&error];
+    if (!encoded) { caller("persona", "encode", "failed"); return; }
+    const int descriptor = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (descriptor < 0) {
+        snprintf(detail, sizeof detail, "create failed errno=%d", errno);
+        caller("persona", "create", detail);
+        return;
+    }
+    const ssize_t written = write(descriptor, encoded.bytes, encoded.length);
+    close(descriptor);
+    chmod(path, 0600);
+    chown(path, 0, 0);
+    snprintf(detail, sizeof detail, "written=%lld of %llu mode=0600", (long long) written,
+             (unsigned long long) encoded.length);
+    caller("persona", "create", detail);
 }
 
 /* H236hu: ordering experiment.  SpringBoard launched at 126.5 s while backboardd
@@ -399,13 +588,22 @@ static void schedule_display_probes(void)
         const int64_t nanos = (int64_t) (delay * 1e9);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, nanos), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             probe_displays("timer");
+            probe_services();
         });
     }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (60.0 * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        restart_springboard("restart");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (30.0 * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            read_springboard_log();
+    // H236iq: ten rounds ten seconds apart, so the log shows whether com.apple.lsd appears at all.
+    for (unsigned round = 0; round < 10; ++round) {
+        const int64_t lateness = (int64_t) ((30.0 + round * 10.0) * 1e9);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, lateness), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            probe_lsd(round);
         });
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (45.0 * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        fix_persona();
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (60.0 * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        probe_gestalt_cache();
+        restart_springboard("restart");
         for (double delay = 12.0; delay <= 60.0; delay += 16.0) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                 probe_displays("after");

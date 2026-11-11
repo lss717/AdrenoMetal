@@ -362,6 +362,32 @@ static id trace_object_of(const char *className, const char *kind);
  *  device does the same (nmb_* handles) and Metal then carries on to its device
  *  information queries; answering nil instead makes Metal dereference NULL in
  *  its own bookkeeping (gz: SIGSEGV 38 ms after the depth/stencil state). */
+/* H236hp: the stub objects derive from the real Metal classes but cannot carry
+ * our own ivars, so their scalar answers live in a side table filled from the
+ * descriptors they were created with.  Without this, -width/-pixelFormat/etc.
+ * run the real (uninitialised) implementations and return garbage with no log
+ * line, which is what made CoreAnimation drop every frame in ho. */
+struct TraceStorage {
+    __unsafe_unretained id object;
+    unsigned long long length, width, height, pixelFormat, textureType, storageMode;
+    unsigned long long mipmaps, samples, usage, arrayLength, gpuAddress;
+    void *contents;
+};
+
+static struct TraceStorage gStorage[512];
+static unsigned gStorageCount;
+
+static struct TraceStorage *storage_for(id object, bool create)
+{
+    for (unsigned index = 0; index < gStorageCount; ++index)
+        if (gStorage[index].object == object) return &gStorage[index];
+    if (!create || gStorageCount >= 512) return NULL;
+    struct TraceStorage *entry = &gStorage[gStorageCount++];
+    memset(entry, 0, sizeof *entry);
+    entry->object = object;
+    return entry;
+}
+
 @interface A540TraceObject : NSObject
 {
 @public
@@ -370,6 +396,20 @@ static id trace_object_of(const char *className, const char *kind);
 @end
 
 @implementation A540TraceObject
+
+- (unsigned long long)width { struct TraceStorage *e = storage_for(self, false); return e ? e->width : 0; }
+- (unsigned long long)height { struct TraceStorage *e = storage_for(self, false); return e ? e->height : 0; }
+- (unsigned long long)depth { return 1; }
+- (unsigned long long)pixelFormat { struct TraceStorage *e = storage_for(self, false); return e ? e->pixelFormat : 0; }
+- (unsigned long long)textureType { struct TraceStorage *e = storage_for(self, false); return e ? e->textureType : 0; }
+- (unsigned long long)storageMode { struct TraceStorage *e = storage_for(self, false); return e ? e->storageMode : 0; }
+- (unsigned long long)mipmapLevelCount { struct TraceStorage *e = storage_for(self, false); return (e && e->mipmaps) ? e->mipmaps : 1; }
+- (unsigned long long)sampleCount { struct TraceStorage *e = storage_for(self, false); return (e && e->samples) ? e->samples : 1; }
+- (unsigned long long)usage { struct TraceStorage *e = storage_for(self, false); return e ? e->usage : 0; }
+- (unsigned long long)arrayLength { struct TraceStorage *e = storage_for(self, false); return (e && e->arrayLength) ? e->arrayLength : 1; }
+- (unsigned long long)length { struct TraceStorage *e = storage_for(self, false); return e ? e->length : 0; }
+- (unsigned long long)gpuAddress { struct TraceStorage *e = storage_for(self, false); return e ? e->gpuAddress : 0; }
+- (void *)contents { struct TraceStorage *e = storage_for(self, false); return e ? e->contents : NULL; }
 
 /** H236hl: Metal sends a stream of private void setters (setSubmissionQueue:,
  *  setCompletionQueue:, setGPUPriority:, …).  Answering one by letting
@@ -765,18 +805,58 @@ static id trace_architecture(void)
     char detail[64];
     snprintf(detail, sizeof detail, "length=%llu options=%llu", length, options);
     caller("dev", "newBufferWithLength:options:", detail);
-    return trace_object_of("_MTLBuffer", "buffer");
+    id buffer = trace_object_of("_MTLBuffer", "buffer");
+    struct TraceStorage *store = storage_for(buffer, true);
+    if (store) store->length = length;
+    return buffer;
 }
 
 - (id)newTextureWithDescriptor:(id)descriptor
 {
-    caller("dev", "newTextureWithDescriptor:", descriptor ? "descriptor=1" : "descriptor=0");
-    return trace_object_of("_MTLTexture", "texture");
+    id texture = trace_object_of("_MTLTexture", "texture");
+    struct TraceStorage *store = storage_for(texture, true);
+    if (store && descriptor) {
+        store->width = [(MTLTextureDescriptor *) descriptor width];
+        store->height = [(MTLTextureDescriptor *) descriptor height];
+        store->pixelFormat = [(MTLTextureDescriptor *) descriptor pixelFormat];
+        store->textureType = [(MTLTextureDescriptor *) descriptor textureType];
+        store->storageMode = [(MTLTextureDescriptor *) descriptor storageMode];
+        store->mipmaps = [(MTLTextureDescriptor *) descriptor mipmapLevelCount];
+        store->samples = [(MTLTextureDescriptor *) descriptor sampleCount];
+        store->usage = [(MTLTextureDescriptor *) descriptor usage];
+        store->arrayLength = [(MTLTextureDescriptor *) descriptor arrayLength];
+        char detail[128];
+        snprintf(detail, sizeof detail, "%llux%llu fmt=%llu type=%llu samples=%llu mips=%llu usage=0x%llx",
+                 store->width, store->height, store->pixelFormat, store->textureType,
+                 store->samples, store->mipmaps, store->usage);
+        caller("dev", "newTextureWithDescriptor:", detail);
+    } else {
+        caller("dev", "newTextureWithDescriptor:", descriptor ? "no-storage" : "descriptor=0");
+    }
+    return texture;
 }
 
 - (id)newRenderPipelineStateWithDescriptor:(id)descriptor error:(id *)error
 {
-    caller("dev", "newRenderPipelineStateWithDescriptor:error:", descriptor ? "descriptor=1" : "descriptor=0");
+    char detail[160];
+    if (descriptor) {
+        MTLRenderPipelineDescriptor *pipelineDescriptor = (MTLRenderPipelineDescriptor *) descriptor;
+        id vertex = [pipelineDescriptor vertexFunction], fragment = [pipelineDescriptor fragmentFunction];
+        id attachments = [pipelineDescriptor colorAttachments];
+        // colorAttachments is an MTLRenderPipelineColorAttachmentDescriptorArray:
+        // its first entry answers pixelFormat.
+        unsigned long long format = 0;
+        if ([attachments respondsToSelector:@selector(objectAtIndexedSubscript:)])
+            format = [[attachments objectAtIndexedSubscript:0] pixelFormat];
+        const char *vertexName = vertex ? [[vertex name] UTF8String] : NULL;
+        const char *fragmentName = fragment ? [[fragment name] UTF8String] : NULL;
+        snprintf(detail, sizeof detail, "vs=%s fs=%s fmt0=%llu samples=%llu",
+                 vertexName ? vertexName : "nil", fragmentName ? fragmentName : "nil",
+                 format, (unsigned long long) [pipelineDescriptor rasterSampleCount]);
+    } else {
+        snprintf(detail, sizeof detail, "descriptor=0");
+    }
+    caller("dev", "newRenderPipelineStateWithDescriptor:error:", detail);
     return trace_object_of("_MTLRenderPipelineState", "pipeline");
 }
 

@@ -1038,11 +1038,16 @@ static void schedule_display_probes(void)
     for (double delay = 120.0; delay <= 280.0; delay += 80.0) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             probe_first_frame("frame");
+            /* H272e: the display walk used to have its own dispatch_after(240 s), but
+             * the Metal device is only initialised at 213-289 s depending on the boot,
+             * so that timer landed past the end of the run.  Chain it instead: if the
+             * frame probe fired at all, the display probe fires in the same breath. */
+            probe_display_frame("disp");
         });
     }
     /* H272d: the display-context walk.  Two attempts, both after the ~190 s mark where
      * SpringBoard starts talking, so a failure is not confused with "not yet ready". */
-    for (double delay = 240.0; delay <= 300.0; delay += 60.0) {
+    for (double delay = 90.0; delay <= 170.0; delay += 80.0) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             probe_display_frame("disp");
         });

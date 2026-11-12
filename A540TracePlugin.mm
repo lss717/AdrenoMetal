@@ -1480,7 +1480,24 @@ static uint32_t gHandoffSelector;
 static bool connectHandoff(void)
 {
     if (gHandoff) return true;
-    io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NativeAdrenoGpu"));
+    /* H272aa: IOServiceMatching() matches class names, but "NativeAdrenoGpu" is the
+     * registry *name* NativeAdrenoPublish gives its service (setName), so a direct match
+     * fails (measured: op=match cls=- ok=0).  Enumerate the accelerator services and pick
+     * the entry whose name is NativeAdrenoGpu. */
+    io_iterator_t iterator = 0;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOAcceleratorES"), &iterator) != KERN_SUCCESS) return false;
+    io_service_t service = 0;
+    io_service_t candidate = 0;
+    while ((candidate = IOIteratorNext(iterator))) {
+        io_name_t name;
+        memset(name, 0, sizeof name);
+        if (IORegistryEntryGetName(candidate, name) == KERN_SUCCESS && strcmp(name, "NativeAdrenoGpu") == 0) {
+            service = candidate;
+            break;
+        }
+        IOObjectRelease(candidate);
+    }
+    IOObjectRelease(iterator);
     if (!service) return false;
     io_connect_t connection = 0;
     kern_return_t status = IOServiceOpen(service, mach_task_self(), 0x4148u, &connection);
@@ -1497,7 +1514,7 @@ static bool connectHandoff(void)
 }
 static uint32_t handoff_call(uint32_t method, const void *input, size_t inputSize, void *output, size_t outputSize)
 {
-    if (!connectHandoff()) return 0xe00002c7u;
+    if (!connectHandoff()) { caller("disp", "handoff", "open-failed"); return 0xe00002c6u; }
     uint8_t buffer[512];
     if (inputSize > sizeof buffer - 8) return 0xe00002c6u;
     uint32_t header[2] = { kTunnelMagic, method };

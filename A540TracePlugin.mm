@@ -1024,7 +1024,10 @@ static void probe_display_frame(const char *why)
             }
         }
         if (!context) {
-            return;
+            /* H272n: ctx is always 0 inside backboardd, and the old `return` here meant
+             * presentSurface:/allContexts were never reached in any round.  Keep walking
+             * - the direct-present path needs no context at all. */
+            caller("disp", "context", "none, continue");
         }
         id root = nil;
         const SEL layerSel = NSSelectorFromString(@"layer");

@@ -1471,6 +1471,43 @@ static void install_crash_reporter(void)
     sigaction(SIGILL, &action, NULL);
 }
 
+/* H272x: hand-off methods (0x7000..0x7003) are only served on a connection opened with
+ * NativeAdrenoHandoffOpenType (0x4148). The normal connection opens with type 0 and gets
+ * kIOReturnUnsupported (measured rc=0xe00002c7), so a second dedicated connection carries
+ * the display hand-off traffic. */
+static io_connect_t gHandoff;
+static uint32_t gHandoffSelector;
+static bool connectHandoff(void)
+{
+    if (gHandoff) return true;
+    io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOAcceleratorES"));
+    if (!service) return false;
+    io_connect_t connection = 0;
+    kern_return_t status = IOServiceOpen(service, mach_task_self(), 0x4148u, &connection);
+    IOObjectRelease(service);
+    if (status != KERN_SUCCESS || !connection) return false;
+    uint32_t probe[2] = { kTunnelMagic, 0xffffffffu };
+    for (uint32_t selector = 0; selector < 256; ++selector) {
+        if (IOConnectCallStructMethod(connection, selector, probe, sizeof probe, NULL, NULL) == KERN_SUCCESS) {
+            gHandoff = connection; gHandoffSelector = selector; return true;
+        }
+    }
+    IOServiceClose(connection);
+    return false;
+}
+static uint32_t handoff_call(uint32_t method, const void *input, size_t inputSize, void *output, size_t outputSize)
+{
+    if (!connectHandoff()) return 0xe00002c7u;
+    uint8_t buffer[512];
+    if (inputSize > sizeof buffer - 8) return 0xe00002c6u;
+    uint32_t header[2] = { kTunnelMagic, method };
+    memcpy(buffer, header, sizeof header);
+    if (input && inputSize) memcpy(buffer + 8, input, inputSize);
+    size_t outSize = outputSize;
+    kern_return_t status = IOConnectCallStructMethod(gHandoff, gHandoffSelector, buffer, inputSize + 8, output, &outSize);
+    return (uint32_t) status;
+}
+
 static bool connectAccelerator(void)
 {
     if (gConnection) return true;
@@ -1830,7 +1867,7 @@ static void offer_surface_to_display(void *surface, const char *sel)
     }
     struct { uint32_t version, format; uint64_t width, height, stride, bytes; } mode;
     memset(&mode, 0, sizeof mode);
-    uint32_t status = abi_call_rc(0x7000, NULL, 0, &mode, sizeof mode);
+    uint32_t status = handoff_call(0x7000, NULL, 0, &mode, sizeof mode);
     char detail[180];
     if (status) {
         snprintf(detail, sizeof detail, "display=no-handoff rc=0x%x", status);
@@ -1850,7 +1887,7 @@ static void offer_surface_to_display(void *surface, const char *sel)
     present.format = 1;   /* NGP_BGRX8888 */
     struct { uint64_t sequence, bytes; } transfer;
     memset(&transfer, 0, sizeof transfer);
-    status = abi_call_rc(0x7001, &present, sizeof present, &transfer, sizeof transfer);
+    status = handoff_call(0x7001, &present, sizeof present, &transfer, sizeof transfer);
     snprintf(detail, sizeof detail, "display present rc=0x%x seq=%llu bytes=%llu src=%ux%u stride=%u",
              status, transfer.sequence, transfer.bytes, present.width, present.height, present.stride);
     caller("cmdbuf", sel, detail);

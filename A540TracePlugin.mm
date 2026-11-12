@@ -75,11 +75,16 @@ static id gQueueInstance;
 
 static bool connectAccelerator(void);
 
-static void emit(const char *text)
+/* H272h: everything logged before the accelerator connection exists used to be
+ * dropped silently - that is why the H272g builder line was missing and why
+ * "zero output" was ambiguous.  Early lines go to a small ring and are flushed
+ * on the first successful emit. */
+#define kPendingLines 16
+static char gPending[kPendingLines][kMaxLog + 1];
+static unsigned gPendingCount;
+
+static void emit_raw(const char *text)
 {
-    if (!gConnection && !connectAccelerator()) return;
-    if (!gConnection || !gBudget) return;
-    --gBudget;
     struct { uint32_t magic, method, bytes, reserved; char text[kMaxLog]; } request;
     memset(&request, 0, sizeof request);
     request.magic = kTunnelMagic;
@@ -89,6 +94,28 @@ static void emit(const char *text)
     request.bytes = (uint32_t) n;
     memcpy(request.text, text, n);
     IOConnectCallStructMethod(gConnection, gSelector, &request, sizeof request, NULL, NULL);
+}
+
+static void emit(const char *text)
+{
+    if (!gConnection && !connectAccelerator()) {
+        if (gPendingCount < kPendingLines) {
+            snprintf(gPending[gPendingCount], kMaxLog + 1, "%s", text);
+            gPendingCount++;
+        }
+        return;
+    }
+    if (!gConnection) return;
+    if (gPendingCount) {
+        const unsigned pending = gPendingCount;
+        gPendingCount = 0;
+        for (unsigned i = 0; i < pending; i++) {
+            emit_raw(gPending[i]);
+        }
+    }
+    if (!gBudget) return;
+    --gBudget;
+    emit_raw(text);
 }
 
 static void caller(const char *cls, const char *sel, const char *detail)
@@ -842,6 +869,37 @@ static void probe_first_frame(const char *why)
  *
  * This touches the live display for the duration of one boot; nothing is written to
  * the device and a reboot restores the previous state. */
+static void dump_class(const char *tag, id object)
+{
+    if (!object) {
+        caller("dump", tag, "nil");
+        return;
+    }
+    Class cls = object_getClass(object);
+    const char *image = class_getImageName(cls);
+    const char *base = image ? strrchr(image, '/') : NULL;
+    char detail[190];
+    snprintf(detail, sizeof detail, "%s class=%.48s image=%.48s", tag, class_getName(cls),
+             base ? base + 1 : (image ? image : "-"));
+    caller("dump", "class", detail);
+    unsigned count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    char names[150];
+    size_t used = 0;
+    names[0] = 0;
+    for (unsigned i = 0; methods && i < count && used + 2 < sizeof names; i++) {
+        const char *sel = sel_getName(method_getName(methods[i]));
+        const int written = snprintf(names + used, sizeof names - used, "%s,", sel);
+        if (written < 0) break;
+        used += (size_t) written;
+    }
+    if (methods) {
+        free(methods);
+    }
+    snprintf(detail, sizeof detail, "%s own=%u [%.140s]", tag, count, names);
+    caller("dump", "methods", detail);
+}
+
 static void probe_display_frame(const char *why)
 {
     /* H272f: the display walk must run before the boot dies (209 s in the last two
@@ -890,6 +948,28 @@ static void probe_display_frame(const char *why)
         snprintf(detail, sizeof detail, "%s comm=%s displays=%llu bounds=%.0fx%.0f ctx=%d",
                  why, probe_self_name(), count, bounds.size.width, bounds.size.height, context ? 1 : 0);
         caller("disp", "server", detail);
+        /* H272h: stop guessing.  Print what the real classes expose, then verify
+         * behaviour for each candidate - existence in the list and a non-nil answer
+         * are different things and the difference is the whole answer. */
+        dump_class("disp", display);
+        dump_class("server", server);
+        {
+            static const char *candidates[] = {
+                "context", "contextId", "layer", "rootLayer", "displayLayer",
+                "surface", "mainDisplay", "contexts"
+            };
+            for (unsigned i = 0; i < sizeof candidates / sizeof candidates[0]; i++) {
+                const SEL sel = NSSelectorFromString([NSString stringWithUTF8String:candidates[i]]);
+                const BOOL has = ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(display, @selector(respondsToSelector:), sel);
+                id value = nil;
+                if (has) {
+                    @try { value = ((id (*)(id, SEL)) objc_msgSend)(display, sel); }
+                    @catch (NSException *exception) { value = nil; }
+                }
+                snprintf(detail, sizeof detail, "%s has=%d value=%d", candidates[i], has ? 1 : 0, value ? 1 : 0);
+                caller("disp", "cand", detail);
+            }
+        }
         if (!context) {
             return;
         }

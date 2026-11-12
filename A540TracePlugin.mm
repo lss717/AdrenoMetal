@@ -1094,6 +1094,29 @@ static void present_drawable(id drawable, const char *sel)
 - (unsigned long long)bufferOffset { return 0; }
 - (unsigned long long)bufferBytesPerRow { struct TraceStorage *e = storage_for(self, false); return e ? e->bytesPerRow : 0; }
 
+/* H260: backboardd asks the render command encoder for its tile geometry every
+ * frame (-tileWidth/-tileHeight/-tileDepth; CoreFoundation ____forwarding___
+ * + 0x520 with x0=0 was the SIGTRAP that killed it 11 times per boot).  Apple's
+ * TBDR tile is 32x32; the values are also logged on first use. */
+- (unsigned long long)tileWidth
+{
+    static unsigned logged;
+    if (logged < 4) { logged++; caller("tile", "tileWidth", "32"); }
+    return 32;
+}
+- (unsigned long long)tileHeight
+{
+    static unsigned logged;
+    if (logged < 4) { logged++; caller("tile", "tileHeight", "32"); }
+    return 32;
+}
+- (unsigned long long)tileDepth
+{
+    static unsigned logged;
+    if (logged < 4) { logged++; caller("tile", "tileDepth", "1"); }
+    return 1;
+}
+
 /** H236hl: Metal sends a stream of private void setters (setSubmissionQueue:,
  *  setCompletionQueue:, setGPUPriority:, …).  Answering one by letting
  *  -doesNotRecognizeSelector: return leaves the caller with a value it does not

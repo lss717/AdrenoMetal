@@ -1480,7 +1480,7 @@ static uint32_t gHandoffSelector;
 static bool connectHandoff(void)
 {
     if (gHandoff) return true;
-    io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOAcceleratorES"));
+    io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NativeAdrenoGpu"));
     if (!service) return false;
     io_connect_t connection = 0;
     kern_return_t status = IOServiceOpen(service, mach_task_self(), 0x4148u, &connection);

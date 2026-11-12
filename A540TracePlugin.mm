@@ -715,11 +715,43 @@ static void probe_first_frame(const char *why)
         if (!layer) {
             caller("frame", why, "alloc-nil");
             return;
-        }        if (device) {
-            ((void (*)(id, SEL, id)) objc_msgSend)(layer, @selector(setDevice:), device);
         }
-        ((void (*)(id, SEL, double)) objc_msgSend)(layer, @selector(setContentsScale:), 3.0);
-        ((void (*)(id, SEL, CGRect)) objc_msgSend)(layer, @selector(setBounds), CGRectMake(0, 0, 360, 640));
+        /* H272b: the first run died on `-[CAMetalLayer setBounds]` even though the
+         * plain layer probe had set the same property, so no setter may be assumed:
+         * each one is tried alone and its outcome is reported.  Whether the class
+         * really is CALayer-shaped is itself part of the answer, hence class-name
+         * and respondsToSelector in the same line. */
+        const SEL setDeviceSel = @selector(setDevice:);
+        const SEL setScaleSel = NSSelectorFromString(@"setContentsScale:");
+        const SEL setBoundsSel = NSSelectorFromString(@"setBounds:");
+        const SEL setFrameSel = NSSelectorFromString(@"setFrame:");
+        const bool hasDevice = ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(layer, @selector(respondsToSelector:), setDeviceSel);
+        const bool hasScale = ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(layer, @selector(respondsToSelector:), setScaleSel);
+        const bool hasBounds = ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(layer, @selector(respondsToSelector:), setBoundsSel);
+        const bool hasFrame = ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(layer, @selector(respondsToSelector:), setFrameSel);
+        char detail[190];
+        snprintf(detail, sizeof detail, "%s comm=%s class=%.40s device=%d scale=%d bounds=%d frame=%d",
+                 why, probe_self_name(), class_getName(object_getClass(layer)),
+                 hasDevice ? 1 : 0, hasScale ? 1 : 0, hasBounds ? 1 : 0, hasFrame ? 1 : 0);
+        caller("frame", "class", detail);
+        if (device && hasDevice) {
+            @try { ((void (*)(id, SEL, id)) objc_msgSend)(layer, setDeviceSel, device); }
+            @catch (NSException *exception) { caller("frame", "setDevice", "exception"); }
+        }
+        if (hasScale) {
+            @try { ((void (*)(id, SEL, double)) objc_msgSend)(layer, setScaleSel, 3.0); }
+            @catch (NSException *exception) { caller("frame", "setContentsScale", "exception"); }
+        }
+        const CGRect wanted = CGRectMake(0, 0, 360, 640);
+        if (hasBounds) {
+            @try { ((void (*)(id, SEL, CGRect)) objc_msgSend)(layer, setBoundsSel, wanted); }
+            @catch (NSException *exception) { caller("frame", "setBounds", "exception"); }
+        } else if (hasFrame) {
+            @try { ((void (*)(id, SEL, CGRect)) objc_msgSend)(layer, setFrameSel, wanted); }
+            @catch (NSException *exception) { caller("frame", "setFrame", "exception"); }
+        } else {
+            caller("frame", "geometry", "no-setter");
+        }
         const CGSize before = ((CGSize (*)(id, SEL)) objc_msgSend)(layer, @selector(drawableSize));
 
         id context = nil;
@@ -742,7 +774,6 @@ static void probe_first_frame(const char *why)
             }
         }
         const CGSize after = ((CGSize (*)(id, SEL)) objc_msgSend)(layer, @selector(drawableSize));
-        char detail[190];
         snprintf(detail, sizeof detail, "%s comm=%s ctx=%d ds_before=%.0fx%.0f ds_after=%.0fx%.0f",
                  why, probe_self_name(), context ? 1 : 0,
                  before.width, before.height, after.width, after.height);

@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>   /* getprogname */
+#include <unistd.h>
 #include <mach/mach.h>
 #include <signal.h>
 #include <sys/stat.h>
@@ -1016,13 +1017,24 @@ static void probe_display_frame(const char *why)
  * three runs died at ~157-209 s while the Metal device was only built at 213-289 s,
  * so a device-init-scheduled probe can never be reached.  Five attempts, 30 s apart,
  * all before the death window. */
+/* libSystem exports getprogname(), but the stdlib declaration is hidden behind
+ * __DARWIN_C_FULL and this bundle builds with -std=c++17.  Declare it directly. */
+extern "C" const char *getprogname(void);
+
 __attribute__((constructor)) static void a540_early_display_probe(void)
 {
-    if (strcmp(probe_self_name(), "backboardd") != 0) {
-        return;
-    }
-    for (double delay = 60.0; delay <= 180.0; delay += 30.0) {
+    /* H272g: no process gate.  +[CAWindowServer serverIfRunning] already returns nil
+     * outside the render server, so the name check was redundant - and it was the
+     * reason H272f produced five silent early returns (NSProcessInfo is not reliable
+     * this early).  getprogname() is pure libc and works at construction time.
+     * Every path logs: a zero-line round must never be ambiguous again. */
+    const char *name = getprogname();
+    char detail[120];
+    snprintf(detail, sizeof detail, "comm=%s repeats=60..200/15s", name ? name : "?");
+    caller("builder", "load", detail);
+    for (double delay = 60.0; delay <= 200.0; delay += 15.0) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            /* Stops by itself once a layer is attached (idempotent latch inside). */
             probe_display_frame("early");
         });
     }

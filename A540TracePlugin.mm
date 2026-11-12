@@ -1165,6 +1165,44 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     char detail[120];
     snprintf(detail, sizeof detail, "comm=%s repeats=60..200/15s", name ? name : "?");
     caller("builder", "load", detail);
+    /* H272j: dump the menus synchronously here.  The queues flush once the
+     * accelerator connection exists, so these lines survive even when the boot dies
+     * before the first timer would have fired (191-215 s in the last two runs). */
+    Class serverClass = NSClassFromString(@"CAWindowServer");
+    Class ctxClass = NSClassFromString(@"CAContext");
+    snprintf(detail, sizeof detail, "early server=%d ctx=%d", serverClass ? 1 : 0, ctxClass ? 1 : 0);
+    caller("builder", "early", detail);
+    if (serverClass) {
+        dump_class("server", (id) serverClass);
+        dump_methods("server", serverClass, NULL, 0);
+        id srv = nil;
+        @try { srv = ((id (*)(id, SEL)) objc_msgSend)(serverClass, @selector(serverIfRunning)); }
+        @catch (id ignored) { srv = nil; }
+        if (srv) {
+            id list = nil;
+            @try { list = ((id (*)(id, SEL)) objc_msgSend)(srv, @selector(displays)); }
+            @catch (id ignored) { list = nil; }
+            const unsigned long long n = list ? ((unsigned long long (*)(id, SEL)) objc_msgSend)(list, @selector(count)) : 0;
+            snprintf(detail, sizeof detail, "early srv=1 displays=%llu", n);
+            caller("builder", "early", detail);
+            if (n) {
+                id display = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(list, @selector(objectAtIndex:), 0ULL);
+                static const char *words[] = {
+                    "ontext", "ayer", "urface", "resent", "wap", "oot", "ost",
+                    "ree", "uffer", "rawable", "indow", "ort", "rame", "_"
+                };
+                dump_class("disp", display);
+                dump_methods("disp", object_getClass(display), words,
+                             (unsigned) (sizeof words / sizeof words[0]));
+            }
+        } else {
+            caller("builder", "early", "srv=nil");
+        }
+    }
+    if (ctxClass) {
+        dump_class("ctxcls", (id) ctxClass);
+        dump_methods("ctxmaker", object_getClass((id) ctxClass), NULL, 0);
+    }
     for (double delay = 60.0; delay <= 200.0; delay += 15.0) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             /* Stops by itself once a layer is attached (idempotent latch inside). */

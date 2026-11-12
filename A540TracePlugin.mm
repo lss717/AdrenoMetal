@@ -688,6 +688,119 @@ static void probe_drawable(const char *why)
     }
 }
 
+/* H272b (P1'): the layer probe read drawableSize before nextDrawable and on a
+ * layer that belonged to no context, so 0x0 could be laziness rather than a real
+ * defect.  This probe fixes both weaknesses and then walks the whole way to a
+ * presented frame: attach the layer to a real CAContext, read drawableSize before
+ * and after attaching, take a drawable, fill its storage directly (the texture is
+ * an IOSurface, so no shader and no render pass is needed), and present it.
+ *
+ * Every step is guarded: a context that will not build, a nil drawable or a
+ * texture without a surface each produce one log line instead of an abort. */
+static void probe_first_frame(const char *why)
+{
+    Class layerClass = NSClassFromString(@"CAMetalLayer");
+    Class contextClass = NSClassFromString(@"CAContext");
+    if (!layerClass) {
+        caller("frame", why, "no-CAMetalLayer");
+        return;
+    }
+    id device = nil;
+    id (*createDevice)(void) = (id (*)(void)) dlsym(RTLD_DEFAULT, "MTLCreateSystemDefaultDevice");
+    if (createDevice) {
+        @try { device = createDevice(); } @catch (id ignored) { device = nil; }
+    }
+    @try {
+        id layer = ((id (*)(id, SEL)) objc_msgSend)(((id (*)(id, SEL)) objc_msgSend)(layerClass, @selector(alloc)), @selector(init));
+        if (!layer) {
+            caller("frame", why, "alloc-nil");
+            return;
+        }        if (device) {
+            ((void (*)(id, SEL, id)) objc_msgSend)(layer, @selector(setDevice:), device);
+        }
+        ((void (*)(id, SEL, double)) objc_msgSend)(layer, @selector(setContentsScale:), 3.0);
+        ((void (*)(id, SEL, CGRect)) objc_msgSend)(layer, @selector(setBounds), CGRectMake(0, 0, 360, 640));
+        const CGSize before = ((CGSize (*)(id, SEL)) objc_msgSend)(layer, @selector(drawableSize));
+
+        id context = nil;
+        const SEL factory = NSSelectorFromString(@"contextWithOptions:");
+        if (contextClass && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(contextClass, @selector(respondsToSelector:), factory)) {
+            @try {
+                context = ((id (*)(id, SEL, id)) objc_msgSend)(contextClass, factory, @{});
+            } @catch (NSException *exception) {
+                char detail[160];
+                snprintf(detail, sizeof detail, "%s context exception %.60s", why,
+                         exception.reason ? [exception.reason UTF8String] : "?");
+                caller("frame", "context", detail);
+                context = nil;
+            }
+        }
+        if (context) {
+            const SEL setLayer = NSSelectorFromString(@"setLayer:");
+            if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(context, @selector(respondsToSelector:), setLayer)) {
+                ((void (*)(id, SEL, id)) objc_msgSend)(context, setLayer, layer);
+            }
+        }
+        const CGSize after = ((CGSize (*)(id, SEL)) objc_msgSend)(layer, @selector(drawableSize));
+        char detail[190];
+        snprintf(detail, sizeof detail, "%s comm=%s ctx=%d ds_before=%.0fx%.0f ds_after=%.0fx%.0f",
+                 why, probe_self_name(), context ? 1 : 0,
+                 before.width, before.height, after.width, after.height);
+        caller("frame", "context", detail);
+
+        id drawable = nil;
+        @try {
+            drawable = ((id (*)(id, SEL)) objc_msgSend)(layer, @selector(nextDrawable));
+        } @catch (NSException *exception) {
+            caller("frame", "drawable", "exception");
+        }
+        if (!drawable) {
+            caller("frame", "drawable", "nil");
+            return;
+        }
+        id texture = nil;
+        const SEL textureSel = NSSelectorFromString(@"texture");
+        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(drawable, @selector(respondsToSelector:), textureSel)) {
+            texture = ((id (*)(id, SEL)) objc_msgSend)(drawable, textureSel);
+        }
+        void *surface = NULL;
+        if (texture && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(texture, @selector(respondsToSelector:), @selector(iosurface))) {
+            surface = (void *) (uintptr_t) [texture iosurface];
+        }
+        unsigned long long filled = 0;
+        /* Resolved here rather than through load_surface_queries(): that helper and
+         * its typedefs are defined further down the file, after this probe. */
+        void *(*surfaceBase)(void *) = (void *(*)(void *)) dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddress");
+        size_t (*surfaceAlloc)(void *) = (size_t (*)(void *)) dlsym(RTLD_DEFAULT, "IOSurfaceGetAllocSize");
+        if (surface && surfaceBase && surfaceAlloc) {
+            void *base = surfaceBase(surface);
+            const size_t bytes = surfaceAlloc(surface);
+            if (base && bytes) {
+                /* 0x80 is deliberate: a mid-grey frame is distinguishable from the
+                 * black the panel shows when nothing ever reaches it. */
+                memset(base, 0x80, bytes);
+                filled = (unsigned long long) bytes;
+            }
+        }
+        const CGSize now = ((CGSize (*)(id, SEL)) objc_msgSend)(layer, @selector(drawableSize));
+        snprintf(detail, sizeof detail, "%s comm=%s surface=%d bytes=%llu ds_now=%.0fx%.0f",
+                 why, probe_self_name(), surface ? 1 : 0, filled, now.width, now.height);
+        caller("frame", "fill", detail);
+
+        @try {
+            ((void (*)(id, SEL)) objc_msgSend)(drawable, @selector(present));
+            caller("frame", "present", "sent");
+        } @catch (NSException *exception) {
+            caller("frame", "present", "exception");
+        }
+    } @catch (NSException *exception) {
+        char detail[160];
+        snprintf(detail, sizeof detail, "%s exception %.80s", why,
+                 exception.reason ? [exception.reason UTF8String] : "?");
+        caller("frame", why, detail);
+    }
+}
+
 static void schedule_display_probes(void)
 {
     static bool scheduled;
@@ -716,6 +829,14 @@ static void schedule_display_probes(void)
     for (double delay = 40.0; delay <= 200.0; delay += 80.0) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             probe_drawable("timer");
+        });
+    }
+    /* H272b: the context/present walk starts later, once the render server has had
+     * a chance to publish a display, and repeats past the 189 s mark where
+     * SpringBoard only begins to talk. */
+    for (double delay = 120.0; delay <= 280.0; delay += 80.0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            probe_first_frame("frame");
         });
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (60.0 * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{

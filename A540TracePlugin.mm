@@ -832,6 +832,176 @@ static void probe_first_frame(const char *why)
     }
 }
 
+/* H272d (P1", option a): a client CAContext cannot exist inside backboardd (H272c
+ * ctx=0), so the only context that can present anything here is the display's own
+ * server-side context.  This walk asks the window server for display 0, takes its
+ * context and root layer, attaches a fresh CAMetalLayer as a sublayer, then fills a
+ * drawable and presents.  A grey frame on the panel proves the whole
+ * drawable -> present -> swap -> panel chain at once.
+ *
+ * This touches the live display for the duration of one boot; nothing is written to
+ * the device and a reboot restores the previous state. */
+static void probe_display_frame(const char *why)
+{
+    Class serverClass = NSClassFromString(@"CAWindowServer");
+    Class layerClass = NSClassFromString(@"CAMetalLayer");
+    if (!serverClass || !layerClass) {
+        caller("disp", why, "no-class");
+        return;
+    }
+    id device = nil;
+    id (*createDevice)(void) = (id (*)(void)) dlsym(RTLD_DEFAULT, "MTLCreateSystemDefaultDevice");
+    if (createDevice) {
+        @try { device = createDevice(); } @catch (id ignored) { device = nil; }
+    }
+    @try {
+        id server = ((id (*)(id, SEL)) objc_msgSend)(serverClass, @selector(serverIfRunning));
+        if (!server) {
+            caller("disp", why, "server=nil");
+            return;
+        }
+        id displays = ((id (*)(id, SEL)) objc_msgSend)(server, @selector(displays));
+        const unsigned long long count = displays ? ((unsigned long long (*)(id, SEL)) objc_msgSend)(displays, @selector(count)) : 0;
+        if (!count) {
+            caller("disp", why, "displays=0");
+            return;
+        }
+        id display = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(displays, @selector(objectAtIndex:), 0ULL);
+        CGRect bounds = CGRectMake(0, 0, 0, 0);
+        const SEL boundsSel = NSSelectorFromString(@"bounds");
+        if (display && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(display, @selector(respondsToSelector:), boundsSel)) {
+            bounds = ((CGRect (*)(id, SEL)) objc_msgSend)(display, boundsSel);
+        }
+        id context = nil;
+        const SEL contextSel = NSSelectorFromString(@"context");
+        if (display && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(display, @selector(respondsToSelector:), contextSel)) {
+            @try { context = ((id (*)(id, SEL)) objc_msgSend)(display, contextSel); }
+            @catch (NSException *exception) { caller("disp", "context", "exception"); }
+        }
+        char detail[190];
+        snprintf(detail, sizeof detail, "%s comm=%s displays=%llu bounds=%.0fx%.0f ctx=%d",
+                 why, probe_self_name(), count, bounds.size.width, bounds.size.height, context ? 1 : 0);
+        caller("disp", "server", detail);
+        if (!context) {
+            return;
+        }
+        id root = nil;
+        const SEL layerSel = NSSelectorFromString(@"layer");
+        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(context, @selector(respondsToSelector:), layerSel)) {
+            root = ((id (*)(id, SEL)) objc_msgSend)(context, layerSel);
+        }
+        snprintf(detail, sizeof detail, "%s root=%d rootclass=%.40s", why, root ? 1 : 0,
+                 root ? object_getClassName(root) : "-");
+        caller("disp", "root", detail);
+
+        id layer = ((id (*)(id, SEL)) objc_msgSend)(((id (*)(id, SEL)) objc_msgSend)(layerClass, @selector(alloc)), @selector(init));
+        if (!layer) {
+            caller("disp", why, "layer=nil");
+            return;
+        }
+        if (device) {
+            ((void (*)(id, SEL, id)) objc_msgSend)(layer, @selector(setDevice:), device);
+        }
+        const SEL setScale = NSSelectorFromString(@"setContentsScale:");
+        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(layer, @selector(respondsToSelector:), setScale)) {
+            ((void (*)(id, SEL, double)) objc_msgSend)(layer, setScale, 3.0);
+        }
+        /* The layer has to cover the display in the display's own coordinates. */
+        const CGRect frame = bounds.size.width > 0 ? bounds : CGRectMake(0, 0, 360, 640);
+        const SEL setFrame = NSSelectorFromString(@"setFrame:");
+        const SEL setBounds = NSSelectorFromString(@"setBounds:");
+        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(layer, @selector(respondsToSelector:), setFrame)) {
+            ((void (*)(id, SEL, CGRect)) objc_msgSend)(layer, setFrame, frame);
+        } else if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(layer, @selector(respondsToSelector:), setBounds)) {
+            ((void (*)(id, SEL, CGRect)) objc_msgSend)(layer, setBounds, CGRectMake(0, 0, frame.size.width, frame.size.height));
+        }
+        const SEL setOpaque = NSSelectorFromString(@"setOpaque:");
+        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(layer, @selector(respondsToSelector:), setOpaque)) {
+            ((void (*)(id, SEL, BOOL)) objc_msgSend)(layer, setOpaque, YES);
+        }
+        const SEL setGravity = NSSelectorFromString(@"setContentsGravity:");
+        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(layer, @selector(respondsToSelector:), setGravity)) {
+            ((void (*)(id, SEL, id)) objc_msgSend)(layer, setGravity, @"resizeAspect");
+        }
+
+        /* Attach.  addSublayer: on the display's own layer is preferred: the context's
+         * -setLayer: would replace the root and is the more invasive of the two. */
+        bool attached = false;
+        const SEL addSublayer = NSSelectorFromString(@"addSublayer:");
+        if (root && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(root, @selector(respondsToSelector:), addSublayer)) {
+            @try { ((void (*)(id, SEL, id)) objc_msgSend)(root, addSublayer, layer); attached = true; }
+            @catch (NSException *exception) { caller("disp", "sublayer", "exception"); }
+        }
+        if (!attached && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(context, @selector(respondsToSelector:), NSSelectorFromString(@"setLayer:"))) {
+            @try { ((void (*)(id, SEL, id)) objc_msgSend)(context, NSSelectorFromString(@"setLayer:"), layer); attached = true; }
+            @catch (NSException *exception) { caller("disp", "setLayer", "exception"); }
+        }
+        snprintf(detail, sizeof detail, "%s attached=%d frame=%.0fx%.0f opaque=1", why, attached ? 1 : 0,
+                 frame.size.width, frame.size.height);
+        caller("disp", "attach", detail);
+        if (!attached) {
+            return;
+        }
+
+        id drawable = nil;
+        @try { drawable = ((id (*)(id, SEL)) objc_msgSend)(layer, @selector(nextDrawable)); }
+        @catch (NSException *exception) { caller("disp", "drawable", "exception"); }
+        if (!drawable) {
+            caller("disp", "drawable", "nil");
+            return;
+        }
+        id texture = nil;
+        const SEL textureSel = NSSelectorFromString(@"texture");
+        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(drawable, @selector(respondsToSelector:), textureSel)) {
+            texture = ((id (*)(id, SEL)) objc_msgSend)(drawable, textureSel);
+        }
+        void *surface = NULL;
+        if (texture && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(texture, @selector(respondsToSelector:), @selector(iosurface))) {
+            surface = (void *) (uintptr_t) [texture iosurface];
+        }
+        unsigned long long filled = 0;
+        void *(*surfaceBase)(void *) = (void *(*)(void *)) dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddress");
+        size_t (*surfaceAlloc)(void *) = (size_t (*)(void *)) dlsym(RTLD_DEFAULT, "IOSurfaceGetAllocSize");
+        if (surface && surfaceBase && surfaceAlloc) {
+            void *base = surfaceBase(surface);
+            const size_t bytes = surfaceAlloc(surface);
+            if (base && bytes) {
+                memset(base, 0x80, bytes);
+                filled = (unsigned long long) bytes;
+            }
+        }
+        snprintf(detail, sizeof detail, "%s surface=%d bytes=%llu", why, surface ? 1 : 0, filled);
+        caller("disp", "fill", detail);
+
+        /* Two paths to the panel: the drawable's own present, and -setContents: with the
+         * surface, which is what a plain CALayer would use.  Either landing on the panel
+         * answers the question. */
+        @try {
+            ((void (*)(id, SEL)) objc_msgSend)(drawable, @selector(present));
+            caller("disp", "present", "sent");
+        } @catch (NSException *exception) {
+            caller("disp", "present", "exception");
+        }
+        if (surface) {
+            const SEL setContents = NSSelectorFromString(@"setContents:");
+            if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(layer, @selector(respondsToSelector:), setContents)) {
+                @try {
+                    ((void (*)(id, SEL, id)) objc_msgSend)(layer, setContents, (__bridge id) surface);
+                    caller("disp", "contents", "set");
+                } @catch (NSException *exception) {
+                    caller("disp", "contents", "exception");
+                }
+            }
+        }
+    } @catch (NSException *exception) {
+        char detail[170];
+        snprintf(detail, sizeof detail, "%s exception %.80s: %.50s", why,
+                 exception.name ? [exception.name UTF8String] : "?",
+                 exception.reason ? [exception.reason UTF8String] : "?");
+        caller("disp", why, detail);
+    }
+}
+
 static void schedule_display_probes(void)
 {
     static bool scheduled;
@@ -868,6 +1038,13 @@ static void schedule_display_probes(void)
     for (double delay = 120.0; delay <= 280.0; delay += 80.0) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             probe_first_frame("frame");
+        });
+    }
+    /* H272d: the display-context walk.  Two attempts, both after the ~190 s mark where
+     * SpringBoard starts talking, so a failure is not confused with "not yet ready". */
+    for (double delay = 240.0; delay <= 300.0; delay += 60.0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            probe_display_frame("disp");
         });
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (60.0 * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{

@@ -1141,12 +1141,26 @@ static void probe_display_frame(const char *why)
             void *base = surfaceBase(surface);
             const size_t bytes = surfaceAlloc(surface);
             if (base && bytes) {
-                /* H272o bug 3: 0x80 per byte is alpha=0x80 (half transparent).  Fill
-                 * 0xFF808080 words instead: RGB symmetric, alpha always 0xFF. */
+                /* H272o bug 3: 0x80 per byte is alpha=0x80.  Fill 0xFF808080 words:
+                 * RGB symmetric, alpha always 0xFF.
+                 * H272p: 1 MiB chunks, one line per chunk.  The whole 8 MiB took 6.5 s
+                 * (device memory speed), so the chunk timeline shows whether a block
+                 * stalls and where, instead of a single opaque timestamp. */
                 uint32_t *words = (uint32_t *) base;
                 const size_t count = bytes / 4;
-                for (size_t i = 0; i < count; i++) {
-                    words[i] = 0xFF808080u;
+                const size_t chunk = (1024u * 1024u) / 4u;
+                unsigned chunkNo = 0;
+                for (size_t i = 0; i < count; i += chunk) {
+                    const size_t end = (i + chunk < count) ? i + chunk : count;
+                    for (size_t k = i; k < end; k++) {
+                        words[k] = 0xFF808080u;
+                    }
+                    if (chunkNo < 10) {
+                        snprintf(detail, sizeof detail, "%s chunk=%u off=%u", why, chunkNo,
+                                 (unsigned) (i * 4u));
+                        caller("disp", "fillchunk", detail);
+                    }
+                    chunkNo++;
                 }
                 filled = (unsigned long long) bytes;
             }
@@ -1160,6 +1174,7 @@ static void probe_display_frame(const char *why)
          * shortest route to the panel and does not involve any CA context, layer tree
          * or compositor pass.  Options are passed as an empty dictionary first; the
          * answer (accepted / exception / no-such-selector) is the whole point. */
+        caller("disp", "presentsurface", "enter");
         if (surface) {
             const SEL presentSel = NSSelectorFromString(@"presentSurface:withOptions:");
             if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(display, @selector(respondsToSelector:), presentSel)) {

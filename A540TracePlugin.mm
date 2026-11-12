@@ -900,6 +900,45 @@ static void dump_class(const char *tag, id object)
     caller("dump", "methods", detail);
 }
 
+/* H272i: print names, not a prefix of them.  with words == NULL every method is
+ * printed (chunked, one line per ~5 names); otherwise only names containing one of
+ * the words are, and the match count is printed too, so "no match" and "filter never
+ * ran" cannot be confused. */
+static void dump_methods(const char *tag, Class cls, const char **words, unsigned wordCount)
+{
+    unsigned count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    char line[190];
+    unsigned inLine = 0;
+    unsigned matches = 0;
+    size_t used = 0;
+    snprintf(line, sizeof line, "%s : ", tag);
+    used = strlen(line);
+    for (unsigned i = 0; methods && i < count; i++) {
+        const char *sel = sel_getName(method_getName(methods[i]));
+        bool keep = (words == NULL);
+        for (unsigned w = 0; !keep && w < wordCount; w++) {
+            if (strstr(sel, words[w]) != NULL) keep = true;
+        }
+        if (!keep) continue;
+        matches++;
+        if (inLine >= 5 || used + strlen(sel) + 3 >= sizeof line) {
+            caller("dump", "names", line);
+            snprintf(line, sizeof line, "%s : ", tag);
+            used = strlen(line);
+            inLine = 0;
+        }
+        used += (size_t) snprintf(line + used, sizeof line - used, "%s,", sel);
+        inLine++;
+    }
+    if (methods) {
+        free(methods);
+    }
+    snprintf(line, sizeof line, "%s total=%u matched=%u filter=%s", tag, count, matches,
+             words ? "on" : "off");
+    caller("dump", "count", line);
+}
+
 static void probe_display_frame(const char *why)
 {
     /* H272f: the display walk must run before the boot dies (209 s in the last two
@@ -953,6 +992,20 @@ static void probe_display_frame(const char *why)
          * are different things and the difference is the whole answer. */
         dump_class("disp", display);
         dump_class("server", server);
+        {
+            static const char *words[] = {
+                "ontext", "ayer", "urface", "resent", "wap", "oot", "ost",
+                "ree", "uffer", "rawable", "indow", "ort", "rame", "_"
+            };
+            dump_methods("server", object_getClass(server), NULL, 0);
+            dump_methods("disp", object_getClass(display), words,
+                         (unsigned) (sizeof words / sizeof words[0]));
+            Class ctxClass = NSClassFromString(@"CAContext");
+            dump_class("ctxcls", (id) ctxClass);
+            if (ctxClass) {
+                dump_methods("ctxmaker", object_getClass((id) ctxClass), NULL, 0);
+            }
+        }
         {
             static const char *candidates[] = {
                 "context", "contextId", "layer", "rootLayer", "displayLayer",

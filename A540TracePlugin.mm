@@ -1485,7 +1485,7 @@ static bool connectHandoff(void)
      * fails (measured: op=match cls=- ok=0).  Enumerate the accelerator services and pick
      * the entry whose name is NativeAdrenoGpu. */
     io_iterator_t iterator = 0;
-    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOAcceleratorES"), &iterator) != KERN_SUCCESS) return false;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("AGXAccelerator"), &iterator) != KERN_SUCCESS) return false;
     io_service_t service = 0;
     io_service_t candidate = 0;
     while ((candidate = IOIteratorNext(iterator))) {

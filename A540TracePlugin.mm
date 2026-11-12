@@ -871,6 +871,13 @@ static void probe_first_frame(const char *why)
  * the device and a reboot restores the previous state. */
 static void dump_class(const char *tag, id object)
 {
+    /* H272o bug 4: called on every tick once the device-init timers are reliable;
+     * the menus never change, so print them once. */
+    static bool done;
+    if (done) {
+        return;
+    }
+    done = true;
     if (!object) {
         caller("dump", tag, "nil");
         return;
@@ -906,6 +913,11 @@ static void dump_class(const char *tag, id object)
  * ran" cannot be confused. */
 static void dump_methods(const char *tag, Class cls, const char **words, unsigned wordCount)
 {
+    static bool done;
+    if (done) {
+        return;
+    }
+    done = true;
     unsigned count = 0;
     Method *methods = class_copyMethodList(cls, &count);
     char line[190];
@@ -946,8 +958,11 @@ static void probe_display_frame(const char *why)
      * driven from the bundle constructor, and once a layer is attached it stops. */
     static bool attachedOnce;
     if (attachedOnce) {
+        static bool saidSkip;
+        if (!saidSkip) { saidSkip = true; caller("disp", "skip", "attached-once"); }
         return;
     }
+    caller("disp", "enter", why);
     Class serverClass = NSClassFromString(@"CAWindowServer");
     Class layerClass = NSClassFromString(@"CAMetalLayer");
     if (!serverClass || !layerClass) {
@@ -1050,7 +1065,10 @@ static void probe_display_frame(const char *why)
         if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(layer, @selector(respondsToSelector:), setScale)) {
             ((void (*)(id, SEL, double)) objc_msgSend)(layer, setScale, 3.0);
         }
-        /* The layer has to cover the display in the display's own coordinates. */
+        /* The layer has to cover the display in the display's own coordinates.  Those
+         * are pixels (1080x1920 measured), while CAMetalLayer geometry is points, and
+         * drawableSize = bounds x contentsScale.  With scale 3 that would ask for a
+         * 3240x5760 drawable, so the pixel size is pinned explicitly instead. */
         const CGRect frame = bounds.size.width > 0 ? bounds : CGRectMake(0, 0, 360, 640);
         const SEL setFrame = NSSelectorFromString(@"setFrame:");
         const SEL setBounds = NSSelectorFromString(@"setBounds:");
@@ -1066,6 +1084,12 @@ static void probe_display_frame(const char *why)
         const SEL setGravity = NSSelectorFromString(@"setContentsGravity:");
         if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(layer, @selector(respondsToSelector:), setGravity)) {
             ((void (*)(id, SEL, id)) objc_msgSend)(layer, setGravity, @"resizeAspect");
+        }
+        /* Pin the pixel size so contentsScale cannot inflate it (H272o bug 1). */
+        const SEL setDrawable = NSSelectorFromString(@"setDrawableSize:");
+        const BOOL hasDrawableSize = ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(layer, @selector(respondsToSelector:), setDrawable);
+        if (hasDrawableSize) {
+            ((void (*)(id, SEL, CGSize)) objc_msgSend)(layer, setDrawable, CGSizeMake(1080, 1920));
         }
 
         /* Attach.  addSublayer: on the display's own layer is preferred: the context's
@@ -1092,16 +1116,18 @@ static void probe_display_frame(const char *why)
             caller("disp", "attach", "none, continue");
         }
 
+        /* H272o bug 2: a nil drawable must not end the walk - allContexts below needs no
+         * drawable at all, and one failed nextDrawable would otherwise hide both new
+         * paths again (exactly what cost H272m a round). */
         id drawable = nil;
         @try { drawable = ((id (*)(id, SEL)) objc_msgSend)(layer, @selector(nextDrawable)); }
         @catch (NSException *exception) { caller("disp", "drawable", "exception"); }
         if (!drawable) {
-            caller("disp", "drawable", "nil");
-            return;
+            caller("disp", "drawable", "nil, continue");
         }
         id texture = nil;
         const SEL textureSel = NSSelectorFromString(@"texture");
-        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(drawable, @selector(respondsToSelector:), textureSel)) {
+        if (drawable && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(drawable, @selector(respondsToSelector:), textureSel)) {
             texture = ((id (*)(id, SEL)) objc_msgSend)(drawable, textureSel);
         }
         void *surface = NULL;
@@ -1115,11 +1141,19 @@ static void probe_display_frame(const char *why)
             void *base = surfaceBase(surface);
             const size_t bytes = surfaceAlloc(surface);
             if (base && bytes) {
-                memset(base, 0x80, bytes);
+                /* H272o bug 3: 0x80 per byte is alpha=0x80 (half transparent).  Fill
+                 * 0xFF808080 words instead: RGB symmetric, alpha always 0xFF. */
+                uint32_t *words = (uint32_t *) base;
+                const size_t count = bytes / 4;
+                for (size_t i = 0; i < count; i++) {
+                    words[i] = 0xFF808080u;
+                }
                 filled = (unsigned long long) bytes;
             }
         }
-        snprintf(detail, sizeof detail, "%s surface=%d bytes=%llu", why, surface ? 1 : 0, filled);
+        const CGSize filledSize = ((CGSize (*)(id, SEL)) objc_msgSend)(layer, @selector(drawableSize));
+        snprintf(detail, sizeof detail, "%s surface=%d bytes=%llu ds=%.0fx%.0f",
+                 why, surface ? 1 : 0, filled, filledSize.width, filledSize.height);
         caller("disp", "fill", detail);
 
         /* H272m path 1: hand the filled surface straight to the display.  This is the
@@ -1157,7 +1191,9 @@ static void probe_display_frame(const char *why)
                 @catch (id ignored) { all = nil; }
             }
             const unsigned long long n = all ? ((unsigned long long (*)(id, SEL)) objc_msgSend)(all, @selector(count)) : 0;
-            snprintf(detail, sizeof detail, "%s allctx=%llu", why, all ? n : 0ULL);
+            snprintf(detail, sizeof detail, "%s allctx=%llu cls=%d sel=%d", why, all ? n : 0ULL,
+                     ctxClass ? 1 : 0,
+                     (ctxClass && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(ctxClass, @selector(respondsToSelector:), allSel)) ? 1 : 0);
             caller("disp", "allcontexts", detail);
             for (unsigned long long i = 0; all && i < n && i < 2; i++) {
                 id ctx = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(all, @selector(objectAtIndex:), i);
@@ -1174,6 +1210,7 @@ static void probe_display_frame(const char *why)
                     if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(root, @selector(respondsToSelector:), addSublayer)) {
                         @try {
                             ((void (*)(id, SEL, id)) objc_msgSend)(root, addSublayer, layer);
+                            attachedOnce = true;   /* H272o bug 5: stop re-adding */
                             caller("disp", "allcontexts", "sublayer=added");
                         } @catch (NSException *exception) {
                             caller("disp", "allcontexts", "sublayer=exception");

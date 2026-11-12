@@ -579,6 +579,115 @@ static void __attribute__((unused)) restart_springboard(const char *why)
     }
 }
 
+/* H272 (P1): CADisplay reports px=0x0 and pointScale=0 while the driver publishes
+ * scale 3, so the standing hypothesis is that CAMetalLayer computes a degenerate
+ * drawableSize and the renderer drops every pass for lack of a drawable.  Until now
+ * that was inference: every number came from the display object, never from a layer.
+ * This probe asks the layer itself - bounds, contentsScale, the derived drawableSize
+ * and whether nextDrawable returns anything - and it is pure observation.
+ *
+ * nextDrawable is called last and on a utility queue: a layer that is not attached to
+ * a CAContext has no presentation source, so a nil answer is expected here and says
+ * nothing about the render server's own layers.  A non-degenerate drawableSize is the
+ * part that carries information, because that is geometry CA also computes. */
+static const char *probe_self_name(void)
+{
+    static char name[32];
+    static bool known;
+    if (!known) {
+        NSString *text = [[NSProcessInfo processInfo] processName];
+        snprintf(name, sizeof name, "%s", text ? [text UTF8String] : "?");
+        known = true;
+    }
+    return name;
+}
+
+static void probe_drawable(const char *why)
+{
+    Class layerClass = NSClassFromString(@"CAMetalLayer");
+    if (!layerClass) {
+        caller("draw", why, "no-CAMetalLayer");
+        return;
+    }
+    id device = nil;
+    id (*createDevice)(void) = (id (*)(void)) dlsym(RTLD_DEFAULT, "MTLCreateSystemDefaultDevice");
+    if (createDevice) {
+        @try { device = createDevice(); } @catch (id ignored) { device = nil; }
+    }
+    @try {
+        id layer = ((id (*)(id, SEL)) objc_msgSend)(((id (*)(id, SEL)) objc_msgSend)(layerClass, @selector(alloc)), @selector(init));
+        if (!layer) {
+            caller("draw", why, "alloc-nil");
+            return;
+        }
+        if (device) {
+            ((void (*)(id, SEL, id)) objc_msgSend)(layer, @selector(setDevice:), device);
+        }
+        const SEL setScale = NSSelectorFromString(@"setContentsScale:");
+        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(layer, @selector(respondsToSelector:), setScale)) {
+            ((void (*)(id, SEL, double)) objc_msgSend)(layer, setScale, 3.0);
+        }
+        const SEL setBounds = NSSelectorFromString(@"setBounds:");
+        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(layer, @selector(respondsToSelector:), setBounds)) {
+            ((void (*)(id, SEL, CGRect)) objc_msgSend)(layer, setBounds, CGRectMake(0, 0, 360, 640));
+        }
+        const CGRect bounds = ((CGRect (*)(id, SEL)) objc_msgSend)(layer, @selector(bounds));
+        const CGSize drawable = ((CGSize (*)(id, SEL)) objc_msgSend)(layer, @selector(drawableSize));
+        double scale = -1.0;
+        const SEL scaleSel = NSSelectorFromString(@"contentsScale");
+        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(layer, @selector(respondsToSelector:), scaleSel)) {
+            scale = ((double (*)(id, SEL)) objc_msgSend)(layer, scaleSel);
+        }
+        unsigned long long maxCount = 0;
+        const SEL maxSel = NSSelectorFromString(@"maximumDrawableCount");
+        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(layer, @selector(respondsToSelector:), maxSel)) {
+            maxCount = ((unsigned long long (*)(id, SEL)) objc_msgSend)(layer, maxSel);
+        }
+        char detail[180];
+        snprintf(detail, sizeof detail, "%s comm=%s device=%d bounds=%.0fx%.0f scale=%.2f ds=%.0fx%.0f max=%llu",
+                 why, probe_self_name(), device ? 1 : 0, bounds.size.width, bounds.size.height, scale,
+                 drawable.width, drawable.height, maxCount);
+        caller("draw", "layer", detail);
+        id drawableObject = nil;
+        @try {
+            drawableObject = ((id (*)(id, SEL)) objc_msgSend)(layer, @selector(nextDrawable));
+        } @catch (NSException *exception) {
+            snprintf(detail, sizeof detail, "%s nextDrawable exception %.60s",
+                     why, exception.name ? [exception.name UTF8String] : "?");
+            caller("draw", "next", detail);
+        }
+        if (drawableObject) {
+            const SEL textureSel = NSSelectorFromString(@"texture");
+            id texture = nil;
+            if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(drawableObject, @selector(respondsToSelector:), textureSel)) {
+                texture = ((id (*)(id, SEL)) objc_msgSend)(drawableObject, textureSel);
+            }
+            unsigned long long texW = 0, texH = 0;
+            if (texture) {
+                const SEL widthSel = NSSelectorFromString(@"width");
+                const SEL heightSel = NSSelectorFromString(@"height");
+                if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(texture, @selector(respondsToSelector:), widthSel)) {
+                    texW = ((unsigned long long (*)(id, SEL)) objc_msgSend)(texture, widthSel);
+                }
+                if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(texture, @selector(respondsToSelector:), heightSel)) {
+                    texH = ((unsigned long long (*)(id, SEL)) objc_msgSend)(texture, heightSel);
+                }
+            }
+            snprintf(detail, sizeof detail, "%s comm=%s drawable=1 texture=%d %llux%llu",
+                     why, probe_self_name(), texture ? 1 : 0, texW, texH);
+        } else {
+            snprintf(detail, sizeof detail, "%s comm=%s drawable=nil", why, probe_self_name());
+        }
+        caller("draw", "next", detail);
+    } @catch (NSException *exception) {
+        char detail[160];
+        snprintf(detail, sizeof detail, "%s exception %.80s: %.60s", why,
+                 exception.name ? [exception.name UTF8String] : "?",
+                 exception.reason ? [exception.reason UTF8String] : "?");
+        caller("draw", "layer", detail);
+    }
+}
+
 static void schedule_display_probes(void)
 {
     static bool scheduled;
@@ -601,6 +710,14 @@ static void schedule_display_probes(void)
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (45.0 * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         fix_persona();
     });
+    /* H272: the layer question, asked three times: before the render server is up,
+     * while backboardd is stable, and past the ~192 s mark where the scene request
+     * sometimes appears. */
+    for (double delay = 40.0; delay <= 200.0; delay += 80.0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            probe_drawable("timer");
+        });
+    }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (60.0 * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         probe_gestalt_cache();
         /* H247: the forced restart resets SpringBoard's own startup at ~237 s and

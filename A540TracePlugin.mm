@@ -976,6 +976,8 @@ static void phase_fill(void *surface, uint32_t argb, const char *tag)
     caller("disp", "phase", detail);
 }
 
+static void offer_surface_to_display(void *surface, const char *sel);
+
 static void probe_display_frame(const char *why)
 {
     /* H272f: the display walk must run before the boot dies (209 s in the last two
@@ -1194,6 +1196,12 @@ static void probe_display_frame(const char *why)
         snprintf(detail, sizeof detail, "%s surface=%d bytes=%llu ds=%.0fx%.0f",
                  why, surface ? 1 : 0, filled, filledSize.width, filledSize.height);
         caller("disp", "fill", detail);
+        /* H272x: route the same surface through the display driver's GPU hand-off
+         * (sheng-fb-gpu=1).  It is the existing 0x7000 MODE / 0x7001 PRESENT pair that
+         * the bridge plugin already uses; here it runs from the display walk. */
+        if (surface) {
+            offer_surface_to_display(surface, "gpu");
+        }
 
         /* H272m path 1: hand the filled surface straight to the display.  This is the
          * shortest route to the panel and does not involve any CA context, layer tree

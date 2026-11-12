@@ -1084,7 +1084,9 @@ static void probe_display_frame(const char *why)
             attachedOnce = true;
         }
         if (!attached) {
-            return;
+            /* H272m: keep going anyway.  presentSurface: does not need a layer, so a
+             * failed attach must not stop the direct-present path below. */
+            caller("disp", "attach", "none, continue");
         }
 
         id drawable = nil;
@@ -1116,6 +1118,67 @@ static void probe_display_frame(const char *why)
         }
         snprintf(detail, sizeof detail, "%s surface=%d bytes=%llu", why, surface ? 1 : 0, filled);
         caller("disp", "fill", detail);
+
+        /* H272m path 1: hand the filled surface straight to the display.  This is the
+         * shortest route to the panel and does not involve any CA context, layer tree
+         * or compositor pass.  Options are passed as an empty dictionary first; the
+         * answer (accepted / exception / no-such-selector) is the whole point. */
+        if (surface) {
+            const SEL presentSel = NSSelectorFromString(@"presentSurface:withOptions:");
+            if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(display, @selector(respondsToSelector:), presentSel)) {
+                @try {
+                    ((void (*)(id, SEL, id, id)) objc_msgSend)(display, presentSel, (__bridge id) surface, @{});
+                    caller("disp", "presentsurface", "sent");
+                } @catch (NSException *exception) {
+                    char reason[110];
+                    snprintf(reason, sizeof reason, "exception %.90s",
+                             exception.reason ? [exception.reason UTF8String] : "?");
+                    caller("disp", "presentsurface", reason);
+                }
+            } else {
+                caller("disp", "presentsurface", "no-selector");
+            }
+        } else {
+            caller("disp", "presentsurface", "no-surface");
+        }
+
+        /* H272m path 2: enumerate existing contexts.  +allContexts answers whether the
+         * render server keeps any client context at all; if one exists, its -layer is a
+         * real mount point even though the display object has none. */
+        {
+            Class ctxClass = NSClassFromString(@"CAContext");
+            const SEL allSel = NSSelectorFromString(@"allContexts");
+            id all = nil;
+            if (ctxClass && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(ctxClass, @selector(respondsToSelector:), allSel)) {
+                @try { all = ((id (*)(id, SEL)) objc_msgSend)(ctxClass, allSel); }
+                @catch (id ignored) { all = nil; }
+            }
+            const unsigned long long n = all ? ((unsigned long long (*)(id, SEL)) objc_msgSend)(all, @selector(count)) : 0;
+            snprintf(detail, sizeof detail, "%s allctx=%llu", why, all ? n : 0ULL);
+            caller("disp", "allcontexts", detail);
+            for (unsigned long long i = 0; all && i < n && i < 2; i++) {
+                id ctx = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(all, @selector(objectAtIndex:), i);
+                id root = nil;
+                const SEL layerSel = NSSelectorFromString(@"layer");
+                if (ctx && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(ctx, @selector(respondsToSelector:), layerSel)) {
+                    root = ((id (*)(id, SEL)) objc_msgSend)(ctx, layerSel);
+                }
+                snprintf(detail, sizeof detail, "%s ctx[%llu]=%d root=%d rootcls=%.30s", why, i,
+                         ctx ? 1 : 0, root ? 1 : 0, root ? object_getClassName(root) : "-");
+                caller("disp", "allcontexts", detail);
+                if (root) {
+                    const SEL addSublayer = NSSelectorFromString(@"addSublayer:");
+                    if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(root, @selector(respondsToSelector:), addSublayer)) {
+                        @try {
+                            ((void (*)(id, SEL, id)) objc_msgSend)(root, addSublayer, layer);
+                            caller("disp", "allcontexts", "sublayer=added");
+                        } @catch (NSException *exception) {
+                            caller("disp", "allcontexts", "sublayer=exception");
+                        }
+                    }
+                }
+            }
+        }
 
         /* Two paths to the panel: the drawable's own present, and -setContents: with the
          * surface, which is what a plain CALayer would use.  Either landing on the panel

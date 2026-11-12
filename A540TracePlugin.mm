@@ -1110,6 +1110,63 @@ static void present_drawable(id drawable, const char *sel)
     if (logged < 4) { logged++; caller("tile", "tileHeight", "32"); }
     return 32;
 }
+/* H268: the draw path is where "a frame exists" becomes measurable.  Count
+ * every draw the renderer issues and log the first few plus a summary on commit. */
+static unsigned gDrawCalls;
+static unsigned long long gDrawPrimitives;
+
+- (void)drawPrimitives:(NSUInteger)type vertexStart:(NSUInteger)vertexStart vertexCount:(NSUInteger)vertexCount
+{
+    char detail[80];
+    gDrawCalls++;
+    gDrawPrimitives += (unsigned long long)vertexCount;
+    if (gDrawCalls <= 8 || (gDrawCalls % 32) == 0) {
+        snprintf(detail, sizeof detail, "type=%llu count=%llu total=%u prims=%llu",
+                 (unsigned long long)type, (unsigned long long)vertexCount,
+                 gDrawCalls, gDrawPrimitives);
+        caller(kind, "drawPrimitives:vertexStart:vertexCount:", detail);
+    }
+}
+
+- (void)drawPrimitives:(NSUInteger)type vertexStart:(NSUInteger)vertexStart vertexCount:(NSUInteger)vertexCount instanceCount:(NSUInteger)instanceCount
+{
+    char detail[80];
+    gDrawCalls++;
+    gDrawPrimitives += (unsigned long long)vertexCount;
+    if (gDrawCalls <= 8 || (gDrawCalls % 32) == 0) {
+        snprintf(detail, sizeof detail, "type=%llu count=%llu inst=%llu total=%u",
+                 (unsigned long long)type, (unsigned long long)vertexCount,
+                 (unsigned long long)instanceCount, gDrawCalls);
+        caller(kind, "drawPrimitives:...instanceCount:", detail);
+    }
+}
+
+- (void)drawIndexedPrimitives:(NSUInteger)type indexCount:(NSUInteger)indexCount indexType:(NSUInteger)indexType indexBuffer:(id)indexBuffer indexBufferOffset:(NSUInteger)indexBufferOffset
+{
+    char detail[80];
+    gDrawCalls++;
+    gDrawPrimitives += (unsigned long long)indexCount;
+    if (gDrawCalls <= 8 || (gDrawCalls % 32) == 0) {
+        snprintf(detail, sizeof detail, "type=%llu idx=%llu total=%u prims=%llu",
+                 (unsigned long long)type, (unsigned long long)indexCount,
+                 gDrawCalls, gDrawPrimitives);
+        caller(kind, "drawIndexedPrimitives:...", detail);
+    }
+}
+
+- (void)drawIndexedPrimitives:(NSUInteger)type indexCount:(NSUInteger)indexCount indexType:(NSUInteger)indexType indexBuffer:(id)indexBuffer indexBufferOffset:(NSUInteger)indexBufferOffset instanceCount:(NSUInteger)instanceCount
+{
+    char detail[80];
+    gDrawCalls++;
+    gDrawPrimitives += (unsigned long long)indexCount;
+    if (gDrawCalls <= 8 || (gDrawCalls % 32) == 0) {
+        snprintf(detail, sizeof detail, "type=%llu idx=%llu inst=%llu total=%u",
+                 (unsigned long long)type, (unsigned long long)indexCount,
+                 (unsigned long long)instanceCount, gDrawCalls);
+        caller(kind, "drawIndexedPrimitives:...instanceCount:", detail);
+    }
+}
+
 - (unsigned long long)tileDepth
 {
     static unsigned logged;

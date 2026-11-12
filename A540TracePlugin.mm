@@ -843,6 +843,13 @@ static void probe_first_frame(const char *why)
  * the device and a reboot restores the previous state. */
 static void probe_display_frame(const char *why)
 {
+    /* H272f: the display walk must run before the boot dies (209 s in the last two
+     * runs), but the Metal device is only initialised at 213-289 s.  So it is also
+     * driven from the bundle constructor, and once a layer is attached it stops. */
+    static bool attachedOnce;
+    if (attachedOnce) {
+        return;
+    }
     Class serverClass = NSClassFromString(@"CAWindowServer");
     Class layerClass = NSClassFromString(@"CAMetalLayer");
     if (!serverClass || !layerClass) {
@@ -939,6 +946,9 @@ static void probe_display_frame(const char *why)
         snprintf(detail, sizeof detail, "%s attached=%d frame=%.0fx%.0f opaque=1", why, attached ? 1 : 0,
                  frame.size.width, frame.size.height);
         caller("disp", "attach", detail);
+        if (attached) {
+            attachedOnce = true;
+        }
         if (!attached) {
             return;
         }
@@ -999,6 +1009,22 @@ static void probe_display_frame(const char *why)
                  exception.name ? [exception.name UTF8String] : "?",
                  exception.reason ? [exception.reason UTF8String] : "?");
         caller("disp", why, detail);
+    }
+}
+
+/* H272f: drive the display walk from bundle load, not from device init.  The last
+ * three runs died at ~157-209 s while the Metal device was only built at 213-289 s,
+ * so a device-init-scheduled probe can never be reached.  Five attempts, 30 s apart,
+ * all before the death window. */
+__attribute__((constructor)) static void a540_early_display_probe(void)
+{
+    if (strcmp(probe_self_name(), "backboardd") != 0) {
+        return;
+    }
+    for (double delay = 60.0; delay <= 180.0; delay += 30.0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            probe_display_frame("early");
+        });
     }
 }
 

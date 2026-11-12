@@ -951,6 +951,31 @@ static void dump_methods(const char *tag, Class cls, const char **words, unsigne
     caller("dump", "count", line);
 }
 
+/* H272q phase colours: the panel itself reports which write arrived last, so no
+ * one has to remember the clock.  0xFF404040 = only the fill reached it,
+ * 0xFFA0A0A0 = presentSurface returned, 0xFFF0F0F0 = the allContexts mount ran. */
+static void phase_fill(void *surface, uint32_t argb, const char *tag)
+{
+    void *(*base)(void *) = (void *(*)(void *)) dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddress");
+    size_t (*alloc)(void *) = (size_t (*)(void *)) dlsym(RTLD_DEFAULT, "IOSurfaceGetAllocSize");
+    if (!surface || !base || !alloc) {
+        return;
+    }
+    void *address = base(surface);
+    const size_t bytes = alloc(surface);
+    if (!address || !bytes) {
+        return;
+    }
+    uint32_t *words = (uint32_t *) address;
+    const size_t count = bytes / 4;
+    for (size_t i = 0; i < count; i++) {
+        words[i] = argb;
+    }
+    char detail[80];
+    snprintf(detail, sizeof detail, "%s argb=0x%08x bytes=%u", tag, argb, (unsigned) bytes);
+    caller("disp", "phase", detail);
+}
+
 static void probe_display_frame(const char *why)
 {
     /* H272f: the display walk must run before the boot dies (209 s in the last two
@@ -1153,7 +1178,7 @@ static void probe_display_frame(const char *why)
                 for (size_t i = 0; i < count; i += chunk) {
                     const size_t end = (i + chunk < count) ? i + chunk : count;
                     for (size_t k = i; k < end; k++) {
-                        words[k] = 0xFF808080u;
+                        words[k] = 0xFF404040u;
                     }
                     if (chunkNo < 10) {
                         snprintf(detail, sizeof detail, "%s chunk=%u off=%u", why, chunkNo,
@@ -1174,6 +1199,7 @@ static void probe_display_frame(const char *why)
          * shortest route to the panel and does not involve any CA context, layer tree
          * or compositor pass.  Options are passed as an empty dictionary first; the
          * answer (accepted / exception / no-such-selector) is the whole point. */
+        phase_fill(surface, 0xFFA0A0A0u, "after-enter");
         caller("disp", "presentsurface", "enter");
         if (surface) {
             const SEL presentSel = NSSelectorFromString(@"presentSurface:withOptions:");
@@ -1193,6 +1219,9 @@ static void probe_display_frame(const char *why)
         } else {
             caller("disp", "presentsurface", "no-surface");
         }
+
+        /* Phase colour 3: everything after the present returned. */
+        phase_fill(surface, 0xFFF0F0F0u, "after-present");
 
         /* H272m path 2: enumerate existing contexts.  +allContexts answers whether the
          * render server keeps any client context at all; if one exists, its -layer is a

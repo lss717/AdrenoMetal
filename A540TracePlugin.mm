@@ -1150,6 +1150,53 @@ static void probe_display_frame(const char *why)
          * screenshot shows our own colour instead of the compositor's frame, and CA's own
          * present is indistinguishable from ours.  Observation only from here on; the
          * renderer stays in the history of this file if a stage needs it again. */
+        /* H291: the display has no root layer (root=0).  Ask the render server
+         * itself what it thinks it has: how many displays, whether the active one
+         * carries a context/layer, its renderer flags, and how many CAContexts exist
+         * with which layer class.  Read-only. */
+        {
+            const SEL srvSel = NSSelectorFromString(@"serverIfRunning");
+            id srv = nil;
+            @try {
+                if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(serverClass, @selector(respondsToSelector:), srvSel)) {
+                    srv = ((id (*)(id, SEL)) objc_msgSend)(serverClass, srvSel);
+                }
+            } @catch (NSException *exception) { srv = nil; }
+            id displays = nil;
+            if (srv && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(srv, @selector(respondsToSelector:), NSSelectorFromString(@"displays"))) {
+                @try { displays = ((id (*)(id, SEL)) objc_msgSend)(srv, NSSelectorFromString(@"displays")); }
+                @catch (NSException *exception) { displays = nil; }
+            }
+            const unsigned long long n = displays
+                ? ((unsigned long long (*)(id, SEL)) objc_msgSend)(displays, @selector(count)) : 0;
+            id d0 = n ? ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(displays, @selector(objectAtIndex:), 0) : nil;
+            id dctx = nil, dlayer = nil;
+            unsigned long long flags = 0;
+            if (d0 && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(d0, @selector(respondsToSelector:), NSSelectorFromString(@"context"))) {
+                @try { dctx = ((id (*)(id, SEL)) objc_msgSend)(d0, NSSelectorFromString(@"context")); }
+                @catch (NSException *exception) { dctx = nil; }
+            }
+            if (d0 && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(d0, @selector(respondsToSelector:), NSSelectorFromString(@"layer"))) {
+                @try { dlayer = ((id (*)(id, SEL)) objc_msgSend)(d0, NSSelectorFromString(@"layer")); }
+                @catch (NSException *exception) { dlayer = nil; }
+            }
+            if (srv && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(srv, @selector(respondsToSelector:), NSSelectorFromString(@"rendererFlags"))) {
+                @try { flags = ((unsigned long long (*)(id, SEL)) objc_msgSend)(srv, NSSelectorFromString(@"rendererFlags")); }
+                @catch (NSException *exception) { flags = 0; }
+            }
+            Class ctxCls = NSClassFromString(@"CAContext");
+            id all = nil;
+            if (ctxCls && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)((id) ctxCls, @selector(respondsToSelector:), NSSelectorFromString(@"allContexts"))) {
+                @try { all = ((id (*)(id, SEL)) objc_msgSend)((id) ctxCls, NSSelectorFromString(@"allContexts")); }
+                @catch (NSException *exception) { all = nil; }
+            }
+            const unsigned long long nctx = all
+                ? ((unsigned long long (*)(id, SEL)) objc_msgSend)(all, @selector(count)) : 0;
+            char state[200];
+            snprintf(state, sizeof state, "%s displays=%llu d0ctx=%d d0layer=%s renderer=%llu ctxs=%llu",
+                     why, n, dctx ? 1 : 0, dlayer ? object_getClassName(dlayer) : "-", flags, nctx);
+            caller("srv", "state", state);
+        }
         caller("disp", "observe-only", why);
         return;
 

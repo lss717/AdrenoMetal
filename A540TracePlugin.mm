@@ -30,6 +30,7 @@
 #include <unistd.h>
 #include <mach/mach.h>
 #include <signal.h>
+#include <sys/types.h>
 #include <sys/sysctl.h>
 #include <sys/stat.h>
 #include <fcntl.h>

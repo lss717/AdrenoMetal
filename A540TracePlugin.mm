@@ -30,6 +30,7 @@
 #include <unistd.h>
 #include <mach/mach.h>
 #include <signal.h>
+#include <sys/sysctl.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #ifndef O_NOFOLLOW
@@ -978,6 +979,22 @@ static void phase_fill(void *surface, uint32_t argb, const char *tag)
 
 static void offer_surface_to_display(void *surface, const char *sel);
 
+/* H275: the diagnostic layer this plugin adds paints a solid colour into the real render
+ * context, which makes every presented frame grey and hides whether the render server has
+ * content of its own.  Gate it behind a boot argument so the default path stays clean. */
+static bool trace_boot_arg(const char *needle)
+{
+    static char args[1024];
+    static bool loaded;
+    if (!loaded) {
+        loaded = true;
+        size_t size = sizeof args - 1;
+        if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) != 0) args[0] = 0;
+        args[sizeof args - 1] = 0;
+    }
+    return args[0] && strstr(args, needle) != NULL;
+}
+
 static void probe_display_frame(const char *why)
 {
     /* H272f: the display walk must run before the boot dies (209 s in the last two
@@ -1258,8 +1275,25 @@ static void probe_display_frame(const char *why)
                          ctx ? 1 : 0, root ? 1 : 0, root ? object_getClassName(root) : "-");
                 caller("disp", "allcontexts", detail);
                 if (root) {
+                    const SEL sublayersSel = NSSelectorFromString(@"sublayers");
+                    id sublayers = nil;
+                    if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(root, @selector(respondsToSelector:), sublayersSel)) {
+                        @try { sublayers = ((id (*)(id, SEL)) objc_msgSend)(root, sublayersSel); }
+                        @catch (NSException *exception) { sublayers = nil; }
+                    }
+                    const unsigned long long have = sublayers
+                        ? ((unsigned long long (*)(id, SEL)) objc_msgSend)(sublayers, @selector(count)) : 0;
+                    CGRect rb = CGRectMake(0, 0, 0, 0);
+                    const SEL boundsSel = NSSelectorFromString(@"bounds");
+                    if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(root, @selector(respondsToSelector:), boundsSel)) {
+                        rb = ((CGRect (*)(id, SEL)) objc_msgSend)(root, boundsSel);
+                    }
+                    snprintf(detail, sizeof detail, "%s ctx[%llu] sublayers=%llu bounds=%.0fx%.0f", why, i,
+                             have, rb.size.width, rb.size.height);
+                    caller("disp", "allcontexts", detail);
                     const SEL addSublayer = NSSelectorFromString(@"addSublayer:");
-                    if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(root, @selector(respondsToSelector:), addSublayer)) {
+                    if (trace_boot_arg("h275-probe-layer") &&
+                        ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(root, @selector(respondsToSelector:), addSublayer)) {
                         @try {
                             ((void (*)(id, SEL, id)) objc_msgSend)(root, addSublayer, layer);
                             attachedOnce = true;   /* H272o bug 5: stop re-adding */

@@ -1196,6 +1196,52 @@ static void probe_display_frame(const char *why)
             snprintf(state, sizeof state, "%s displays=%llu d0ctx=%d d0layer=%s renderer=%llu ctxs=%llu",
                      why, n, dctx ? 1 : 0, dlayer ? object_getClassName(dlayer) : "-", flags, nctx);
             caller("srv", "state", state);
+            /* H292: the display has no context while two exist.  Describe each one:
+             * its id, client port, layer class, layer bounds, sublayer count and whether
+             * the layer already carries contents.  Read-only. */
+            for (unsigned long long i = 0; all && i < nctx && i < 3; ++i) {
+                id ctx = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(all, @selector(objectAtIndex:), i);
+                unsigned long long cid = 0;
+                unsigned long long port = 0;
+                id clay = nil;
+                if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(ctx, @selector(respondsToSelector:), NSSelectorFromString(@"contextId"))) {
+                    @try { cid = ((unsigned long long (*)(id, SEL)) objc_msgSend)(ctx, NSSelectorFromString(@"contextId")); }
+                    @catch (NSException *exception) { cid = 0; }
+                }
+                if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(ctx, @selector(respondsToSelector:), NSSelectorFromString(@"clientPort"))) {
+                    @try { port = ((unsigned long long (*)(id, SEL)) objc_msgSend)(ctx, NSSelectorFromString(@"clientPort")); }
+                    @catch (NSException *exception) { port = 0; }
+                }
+                if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(ctx, @selector(respondsToSelector:), NSSelectorFromString(@"layer"))) {
+                    @try { clay = ((id (*)(id, SEL)) objc_msgSend)(ctx, NSSelectorFromString(@"layer")); }
+                    @catch (NSException *exception) { clay = nil; }
+                }
+                unsigned long long subs = 0;
+                int contents = 0;
+                CGRect cb = CGRectMake(0, 0, 0, 0);
+                if (clay) {
+                    if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(clay, @selector(respondsToSelector:), NSSelectorFromString(@"sublayers"))) {
+                        id sl = nil;
+                        @try { sl = ((id (*)(id, SEL)) objc_msgSend)(clay, NSSelectorFromString(@"sublayers")); }
+                        @catch (NSException *exception) { sl = nil; }
+                        if (sl) subs = ((unsigned long long (*)(id, SEL)) objc_msgSend)(sl, @selector(count));
+                    }
+                    if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(clay, @selector(respondsToSelector:), NSSelectorFromString(@"contents"))) {
+                        id c = nil;
+                        @try { c = ((id (*)(id, SEL)) objc_msgSend)(clay, NSSelectorFromString(@"contents")); }
+                        @catch (NSException *exception) { c = nil; }
+                        contents = c ? 1 : 0;
+                    }
+                    if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(clay, @selector(respondsToSelector:), NSSelectorFromString(@"bounds"))) {
+                        cb = ((CGRect (*)(id, SEL)) objc_msgSend)(clay, NSSelectorFromString(@"bounds"));
+                    }
+                }
+                char line[200];
+                snprintf(line, sizeof line, "ctx[%llu] id=%llu port=0x%llx layer=%.28s subs=%llu contents=%d bounds=%.0fx%.0f",
+                         i, cid, port, clay ? object_getClassName(clay) : "-", subs, contents,
+                         cb.size.width, cb.size.height);
+                caller("srv", "ctx", line);
+            }
         }
         caller("disp", "observe-only", why);
         return;

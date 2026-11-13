@@ -1253,12 +1253,17 @@ static void probe_display_frame(const char *why)
             if (!tablesDumped && d0) {
                 tablesDumped = true;
                 dump_class("d0", d0);
-                dump_methods("d0", object_getClass(d0), NULL, 0);
+                static const char *bindWords[] = {
+                    "ontext", "isplay", "erver", "ayer", "ttach", "resent", "alid", "ack"
+                };
+                dump_methods("d0", object_getClass(d0), bindWords,
+                             (unsigned) (sizeof bindWords / sizeof bindWords[0]));
                 if (all && nctx > 0) {
                     id c0 = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(all, @selector(objectAtIndex:), 0);
                     if (c0) {
                         dump_class("c0", c0);
-                        dump_methods("c0", object_getClass(c0), NULL, 0);
+                        dump_methods("c0", object_getClass(c0), bindWords,
+                                     (unsigned) (sizeof bindWords / sizeof bindWords[0]));
                     }
                 }
                 const SEL portSel = NSSelectorFromString(@"clientPortOfContextId:");
@@ -1548,7 +1553,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H295");
+    caller("builder", "build", "H297");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

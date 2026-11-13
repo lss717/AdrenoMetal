@@ -978,45 +978,49 @@ static void phase_fill(void *surface, uint32_t argb, const char *tag)
 
 static void offer_surface_to_display(void *surface, const char *sel);
 
-/* H279: C6a-SB.  CoreAnimation binds no pipeline and draws nothing because there is no
- * scene to composite, and the existing probes only see ports and threads.  Look for
- * FrontBoard's scene objects directly: whether the classes exist, how many scenes the
- * manager holds (it may hand out an NSSet, so go through allObjects), and for each scene
- * its identifier, whether it has a context and whether that context has a layer. */
+/* H280: C6a-SB.  H279 showed FBSceneManager/FBScene do not exist in this process while
+ * FBSWorkspace and FBSSystemService do, so the scene objects are private subclasses reached
+ * through the workspace.  Report the process, which FrontBoard classes exist, and - when a
+ * workspace answers - every scene object by class name, identifier and context/layer. */
 static void probe_scenes(const char *why)
 {
-    static const char *names[] = { "FBSceneManager", "FBSWorkspace", "FBScene", "FBSSystemService" };
-    char detail[200];
+    char detail[220];
+    caller("scene", "proc", probe_self_name());
+    static const char *names[] = { "FBSceneManager", "FBSWorkspace", "FBSBasicScene", "FBSScene",
+                                   "FBSMutableSceneSettings", "FBSSceneSettings", "FBSSystemService" };
     for (unsigned i = 0; i < sizeof names / sizeof names[0]; ++i) {
         Class cls = NSClassFromString([NSString stringWithUTF8String: names[i]]);
         snprintf(detail, sizeof detail, "%s %s=%d", why, names[i], cls ? 1 : 0);
         caller("scene", "class", detail);
     }
-    Class managerClass = NSClassFromString(@"FBSceneManager");
-    if (!managerClass) return;
-    const SEL shared = NSSelectorFromString(@"sharedInstance");
-    id manager = nil;
+    Class workspaceClass = NSClassFromString(@"FBSWorkspace");
+    if (!workspaceClass) return;
+    id workspace = nil;
+    const SEL shared = NSSelectorFromString(@"sharedWorkspace");
     @try {
-        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(managerClass, @selector(respondsToSelector:), shared)) {
-            manager = ((id (*)(id, SEL)) objc_msgSend)(managerClass, shared);
+        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(workspaceClass, @selector(respondsToSelector:), shared)) {
+            workspace = ((id (*)(id, SEL)) objc_msgSend)(workspaceClass, shared);
         }
-    } @catch (NSException *exception) { manager = nil; }
-    if (!manager) { caller("scene", "manager", "nil"); return; }
+    } @catch (NSException *exception) { workspace = nil; }
+    if (!workspace) { caller("scene", "workspace", "nil"); return; }
     id scenes = nil;
-    const SEL scenesSel = NSSelectorFromString(@"scenes");
-    @try {
-        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(manager, @selector(respondsToSelector:), scenesSel)) {
-            scenes = ((id (*)(id, SEL)) objc_msgSend)(manager, scenesSel);
-        }
-    } @catch (NSException *exception) { scenes = nil; }
+    const char *attempt = "none";
+    if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(workspace, @selector(respondsToSelector:), NSSelectorFromString(@"scenes"))) {
+        @try { scenes = ((id (*)(id, SEL)) objc_msgSend)(workspace, NSSelectorFromString(@"scenes")); attempt = "scenes"; }
+        @catch (NSException *exception) { scenes = nil; }
+    }
+    if (!scenes && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(workspace, @selector(respondsToSelector:), NSSelectorFromString(@"allScenes"))) {
+        @try { scenes = ((id (*)(id, SEL)) objc_msgSend)(workspace, NSSelectorFromString(@"allScenes")); attempt = "allScenes"; }
+        @catch (NSException *exception) { scenes = nil; }
+    }
     if (scenes && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(scenes, @selector(respondsToSelector:), NSSelectorFromString(@"allObjects"))) {
         scenes = ((id (*)(id, SEL)) objc_msgSend)(scenes, @selector(allObjects));
     }
     const unsigned long long count = scenes
         ? ((unsigned long long (*)(id, SEL)) objc_msgSend)(scenes, @selector(count)) : 0;
-    snprintf(detail, sizeof detail, "%s scenes=%llu cls=%s", why, count,
+    snprintf(detail, sizeof detail, "%s ws=%s scenes=%llu cls=%s", why, attempt, count,
              scenes ? object_getClassName(scenes) : "-");
-    caller("scene", "manager", detail);
+    caller("scene", "workspace", detail);
     for (unsigned long long i = 0; scenes && i < count && i < 4; ++i) {
         id scene = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(scenes, @selector(objectAtIndex:), i);
         const char *identifier = "-";
@@ -1028,19 +1032,12 @@ static void probe_scenes(const char *why)
             } @catch (NSException *exception) { }
         }
         id context = nil;
-        const SEL ctxSel = NSSelectorFromString(@"context");
-        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(scene, @selector(respondsToSelector:), ctxSel)) {
-            @try { context = ((id (*)(id, SEL)) objc_msgSend)(scene, ctxSel); }
+        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(scene, @selector(respondsToSelector:), NSSelectorFromString(@"context"))) {
+            @try { context = ((id (*)(id, SEL)) objc_msgSend)(scene, NSSelectorFromString(@"context")); }
             @catch (NSException *exception) { context = nil; }
         }
-        id layer = nil;
-        const SEL layerSel = NSSelectorFromString(@"layer");
-        if (context && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(context, @selector(respondsToSelector:), layerSel)) {
-            @try { layer = ((id (*)(id, SEL)) objc_msgSend)(context, layerSel); }
-            @catch (NSException *exception) { layer = nil; }
-        }
-        snprintf(detail, sizeof detail, "%s scene[%llu] id=%.40s ctx=%d layer=%.30s", why, i,
-                 identifier ? identifier : "-", context ? 1 : 0, layer ? object_getClassName(layer) : "-");
+        snprintf(detail, sizeof detail, "%s scene[%llu] class=%.36s id=%.36s ctx=%d", why, i,
+                 object_getClassName(scene), identifier ? identifier : "-", context ? 1 : 0);
         caller("scene", "scene", detail);
     }
 }

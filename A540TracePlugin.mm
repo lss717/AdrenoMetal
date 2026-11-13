@@ -1986,7 +1986,7 @@ static void present_drawable(id drawable, const char *sel)
  * these methods, so the base class answers -setRenderPipelineState: and the draw selectors
  * silently and nothing appears in the trace.  Measured here instead, so "CA never draws"
  * stops being an inference from missing log lines. */
-static unsigned gPipelineBinds, gDrawCalls, gDispatchCalls, gPipelineBindLogged, gDrawLogged;
+static unsigned gPipelineBinds, gPipelineBindLogged, gDispatchCalls;
 
 - (void)setRenderPipelineState:(id)state
 {
@@ -1996,25 +1996,6 @@ static unsigned gPipelineBinds, gDrawCalls, gDispatchCalls, gPipelineBindLogged,
         ++gPipelineBindLogged;
         caller(kind, "setRenderPipelineState", state ? "state=1" : "state=0");
     }
-}
-
-- (void)drawPrimitives:(unsigned long long)type vertexStart:(unsigned long long)start
-           vertexCount:(unsigned long long)count
-{
-    ++gDrawCalls;
-    char detail[96];
-    snprintf(detail, sizeof detail, "type=%llu start=%llu count=%llu", type, start, count);
-    if (gDrawLogged < 8) { ++gDrawLogged; caller(kind, "drawPrimitives", detail); }
-}
-
-- (void)drawPrimitives:(unsigned long long)type vertexStart:(unsigned long long)start
-           vertexCount:(unsigned long long)count instanceCount:(unsigned long long)instances
-{
-    ++gDrawCalls;
-    char detail[128];
-    snprintf(detail, sizeof detail, "type=%llu start=%llu count=%llu inst=%llu",
-             type, start, count, instances);
-    if (gDrawLogged < 8) { ++gDrawLogged; caller(kind, "drawPrimitives", detail); }
 }
 
 - (void)dispatchThreads:(MTLSize)threads threadsPerThreadgroup:(MTLSize)group
@@ -2219,8 +2200,8 @@ static unsigned long long gDrawPrimitives;
 - (void)dealloc
 {
     char detail[128];
-    snprintf(detail, sizeof detail, "binds=%u draws=%u dispatch=%u", gPipelineBinds, gDrawCalls,
-             gDispatchCalls);
+    snprintf(detail, sizeof detail, "binds=%u draws=%llu dispatch=%u", gPipelineBinds,
+             gDrawPrimitives, gDispatchCalls);
     caller(kind, "dealloc", detail);
 }
 

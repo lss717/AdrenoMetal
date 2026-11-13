@@ -1242,6 +1242,26 @@ static void probe_display_frame(const char *why)
                          cb.size.width, cb.size.height);
                 caller("srv", "ctx", line);
             }
+            /* H294: the two contexts are full-screen with a two-layer tree, yet the
+             * display carries none.  Bind the first context to display 0 once and record
+             * the outcome, then watch whether CoreAnimation starts to bind, draw and
+             * commit.  This is the only write this probe performs. */
+            static bool bound;
+            if (!bound && d0 && all && nctx > 0) {
+                bound = true;
+                id c0 = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(all, @selector(objectAtIndex:), 0);
+                const SEL setCtx = NSSelectorFromString(@"setContext:");
+                if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(d0, @selector(respondsToSelector:), setCtx)) {
+                    @try {
+                        ((void (*)(id, SEL, id)) objc_msgSend)(d0, setCtx, c0);
+                        caller("srv", "bind", "setContext=ok");
+                    } @catch (NSException *exception) {
+                        caller("srv", "bind", "exception");
+                    }
+                } else {
+                    caller("srv", "bind", "no-selector");
+                }
+            }
         }
         caller("disp", "observe-only", why);
         return;

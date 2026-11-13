@@ -978,6 +978,73 @@ static void phase_fill(void *surface, uint32_t argb, const char *tag)
 
 static void offer_surface_to_display(void *surface, const char *sel);
 
+/* H279: C6a-SB.  CoreAnimation binds no pipeline and draws nothing because there is no
+ * scene to composite, and the existing probes only see ports and threads.  Look for
+ * FrontBoard's scene objects directly: whether the classes exist, how many scenes the
+ * manager holds (it may hand out an NSSet, so go through allObjects), and for each scene
+ * its identifier, whether it has a context and whether that context has a layer. */
+static void probe_scenes(const char *why)
+{
+    static const char *names[] = { "FBSceneManager", "FBSWorkspace", "FBScene", "FBSSystemService" };
+    char detail[200];
+    for (unsigned i = 0; i < sizeof names / sizeof names[0]; ++i) {
+        Class cls = NSClassFromString([NSString stringWithUTF8String: names[i]]);
+        snprintf(detail, sizeof detail, "%s %s=%d", why, names[i], cls ? 1 : 0);
+        caller("scene", "class", detail);
+    }
+    Class managerClass = NSClassFromString(@"FBSceneManager");
+    if (!managerClass) return;
+    const SEL shared = NSSelectorFromString(@"sharedInstance");
+    id manager = nil;
+    @try {
+        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(managerClass, @selector(respondsToSelector:), shared)) {
+            manager = ((id (*)(id, SEL)) objc_msgSend)(managerClass, shared);
+        }
+    } @catch (NSException *exception) { manager = nil; }
+    if (!manager) { caller("scene", "manager", "nil"); return; }
+    id scenes = nil;
+    const SEL scenesSel = NSSelectorFromString(@"scenes");
+    @try {
+        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(manager, @selector(respondsToSelector:), scenesSel)) {
+            scenes = ((id (*)(id, SEL)) objc_msgSend)(manager, scenesSel);
+        }
+    } @catch (NSException *exception) { scenes = nil; }
+    if (scenes && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(scenes, @selector(respondsToSelector:), NSSelectorFromString(@"allObjects"))) {
+        scenes = ((id (*)(id, SEL)) objc_msgSend)(scenes, @selector(allObjects));
+    }
+    const unsigned long long count = scenes
+        ? ((unsigned long long (*)(id, SEL)) objc_msgSend)(scenes, @selector(count)) : 0;
+    snprintf(detail, sizeof detail, "%s scenes=%llu cls=%s", why, count,
+             scenes ? object_getClassName(scenes) : "-");
+    caller("scene", "manager", detail);
+    for (unsigned long long i = 0; scenes && i < count && i < 4; ++i) {
+        id scene = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(scenes, @selector(objectAtIndex:), i);
+        const char *identifier = "-";
+        const SEL idSel = NSSelectorFromString(@"identifier");
+        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(scene, @selector(respondsToSelector:), idSel)) {
+            @try {
+                id value = ((id (*)(id, SEL)) objc_msgSend)(scene, idSel);
+                if (value) identifier = [value UTF8String];
+            } @catch (NSException *exception) { }
+        }
+        id context = nil;
+        const SEL ctxSel = NSSelectorFromString(@"context");
+        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(scene, @selector(respondsToSelector:), ctxSel)) {
+            @try { context = ((id (*)(id, SEL)) objc_msgSend)(scene, ctxSel); }
+            @catch (NSException *exception) { context = nil; }
+        }
+        id layer = nil;
+        const SEL layerSel = NSSelectorFromString(@"layer");
+        if (context && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(context, @selector(respondsToSelector:), layerSel)) {
+            @try { layer = ((id (*)(id, SEL)) objc_msgSend)(context, layerSel); }
+            @catch (NSException *exception) { layer = nil; }
+        }
+        snprintf(detail, sizeof detail, "%s scene[%llu] id=%.40s ctx=%d layer=%.30s", why, i,
+                 identifier ? identifier : "-", context ? 1 : 0, layer ? object_getClassName(layer) : "-");
+        caller("scene", "scene", detail);
+    }
+}
+
 static void probe_display_frame(const char *why)
 {
     /* H272f: the display walk must run before the boot dies (209 s in the last two
@@ -1403,6 +1470,13 @@ static void schedule_display_probes(void)
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (45.0 * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         fix_persona();
     });
+    /* H279: the scene question, asked across the window where the render server and
+     * SpringBoard are both up. */
+    for (double delay = 120.0; delay <= 360.0; delay += 40.0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            probe_scenes("timer");
+        });
+    }
     /* H272: the layer question, asked three times: before the render server is up,
      * while backboardd is stable, and past the ~192 s mark where the scene request
      * sometimes appears. */

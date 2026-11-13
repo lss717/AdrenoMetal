@@ -1512,6 +1512,10 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     char detail[120];
     snprintf(detail, sizeof detail, "comm=%s repeats=60..200/15s", name ? name : "?");
     caller("builder", "load", detail);
+    /* H295: the addon is written into the Data volume only when the kernel thinks its
+     * content differs, and H294 ran an older bundle without any trace of that.  Print a
+     * build id maintained by hand so every boot says which plugin is actually loaded. */
+    caller("builder", "build", "H295");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

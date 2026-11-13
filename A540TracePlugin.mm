@@ -1246,6 +1246,39 @@ static void probe_display_frame(const char *why)
              * display carries none.  Bind the first context to display 0 once and record
              * the outcome, then watch whether CoreAnimation starts to bind, draw and
              * commit.  This is the only write this probe performs. */
+            /* H296: the bind failed because setContext: does not exist on the display.
+             * Dump the display and CAContext method tables once and ask the server what it
+             * thinks of each context id, so the next attempt uses a real selector. */
+            static bool tablesDumped;
+            if (!tablesDumped && d0) {
+                tablesDumped = true;
+                dump_class("d0", d0);
+                dump_methods("d0", object_getClass(d0), NULL, 0);
+                if (all && nctx > 0) {
+                    id c0 = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(all, @selector(objectAtIndex:), 0);
+                    if (c0) {
+                        dump_class("c0", c0);
+                        dump_methods("c0", object_getClass(c0), NULL, 0);
+                    }
+                }
+                const SEL portSel = NSSelectorFromString(@"clientPortOfContextId:");
+                if (srv && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(srv, @selector(respondsToSelector:), portSel)) {
+                    for (unsigned long long i = 0; all && i < nctx && i < 3; ++i) {
+                        id ctx = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(all, @selector(objectAtIndex:), i);
+                        unsigned long long cid = 0;
+                        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(ctx, @selector(respondsToSelector:), NSSelectorFromString(@"contextId"))) {
+                            @try { cid = ((unsigned long long (*)(id, SEL)) objc_msgSend)(ctx, NSSelectorFromString(@"contextId")); }
+                            @catch (NSException *exception) { cid = 0; }
+                        }
+                        unsigned long long port = 0;
+                        @try { port = ((unsigned long long (*)(id, SEL, unsigned long long)) objc_msgSend)(srv, portSel, cid); }
+                        @catch (NSException *exception) { port = 0; }
+                        char pl[120];
+                        snprintf(pl, sizeof pl, "ctxid=%llu port=0x%llx", cid, port);
+                        caller("srv", "ports", pl);
+                    }
+                }
+            }
             static bool bound;
             if (!bound && d0 && all && nctx > 0) {
                 bound = true;

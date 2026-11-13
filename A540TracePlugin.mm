@@ -1080,6 +1080,15 @@ static void probe_display_frame(const char *why)
                  root ? object_getClassName(root) : "-");
         caller("disp", "root", detail);
 
+        /* H276: the diagnostic renderer has done its job - it proved the transfer and
+         * retirement path (H272r..H275).  It also fills the whole surface with 0xFFA0A0A0
+         * and presents that through the display driver, so every readback and every
+         * screenshot shows our own colour instead of the compositor's frame, and CA's own
+         * present is indistinguishable from ours.  Observation only from here on; the
+         * renderer stays in the history of this file if a stage needs it again. */
+        caller("disp", "observe-only", why);
+        return;
+
         id layer = ((id (*)(id, SEL)) objc_msgSend)(((id (*)(id, SEL)) objc_msgSend)(layerClass, @selector(alloc)), @selector(init));
         if (!layer) {
             caller("disp", why, "layer=nil");

@@ -1982,6 +1982,52 @@ static void present_drawable(id drawable, const char *sel)
  * frame (-tileWidth/-tileHeight/-tileDepth; CoreFoundation ____forwarding___
  * + 0x520 with x0=0 was the SIGTRAP that killed it 11 times per boot).  Apple's
  * TBDR tile is 32x32; the values are also logged on first use. */
+/* H277: the encoders are instances of the real _MTLRenderCommandEncoder subclassed with
+ * these methods, so the base class answers -setRenderPipelineState: and the draw selectors
+ * silently and nothing appears in the trace.  Measured here instead, so "CA never draws"
+ * stops being an inference from missing log lines. */
+static unsigned gPipelineBinds, gDrawCalls, gDispatchCalls, gPipelineBindLogged, gDrawLogged;
+
+- (void)setRenderPipelineState:(id)state
+{
+    ++gPipelineBinds;
+    if (gPipelineBindLogged < 8)
+    {
+        ++gPipelineBindLogged;
+        caller(kind, "setRenderPipelineState", state ? "state=1" : "state=0");
+    }
+}
+
+- (void)drawPrimitives:(unsigned long long)type vertexStart:(unsigned long long)start
+           vertexCount:(unsigned long long)count
+{
+    ++gDrawCalls;
+    char detail[96];
+    snprintf(detail, sizeof detail, "type=%llu start=%llu count=%llu", type, start, count);
+    if (gDrawLogged < 8) { ++gDrawLogged; caller(kind, "drawPrimitives", detail); }
+}
+
+- (void)drawPrimitives:(unsigned long long)type vertexStart:(unsigned long long)start
+           vertexCount:(unsigned long long)count instanceCount:(unsigned long long)instances
+{
+    ++gDrawCalls;
+    char detail[128];
+    snprintf(detail, sizeof detail, "type=%llu start=%llu count=%llu inst=%llu",
+             type, start, count, instances);
+    if (gDrawLogged < 8) { ++gDrawLogged; caller(kind, "drawPrimitives", detail); }
+}
+
+- (void)dispatchThreads:(MTLSize)threads threadsPerThreadgroup:(MTLSize)group
+{
+    ++gDispatchCalls;
+    char detail[128];
+    snprintf(detail, sizeof detail, "threads=%llux%llux%llu group=%llux%llux%llu",
+             (unsigned long long) threads.width, (unsigned long long) threads.height,
+             (unsigned long long) threads.depth, (unsigned long long) group.width,
+             (unsigned long long) group.height, (unsigned long long) group.depth);
+    if (gDispatchCalls <= 4) caller(kind, "dispatchThreads", detail);
+}
+
 - (unsigned long long)tileWidth
 {
     static unsigned logged;
@@ -2170,7 +2216,13 @@ static unsigned long long gDrawPrimitives;
 - (id)device { return gDeviceInstance; }
 - (id)commandQueue { return gDeviceInstance ? (id) gQueueInstance : nil; }
 
-- (void)dealloc { caller(kind, "dealloc", ""); }
+- (void)dealloc
+{
+    char detail[128];
+    snprintf(detail, sizeof detail, "binds=%u draws=%u dispatch=%u", gPipelineBinds, gDrawCalls,
+             gDispatchCalls);
+    caller(kind, "dealloc", detail);
+}
 
 @end
 

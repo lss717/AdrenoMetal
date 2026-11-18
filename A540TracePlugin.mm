@@ -347,7 +347,9 @@ observe_context_state(const char *why, id server, uint32_t id,
             free_index = cursor;
         }
     }
-    if (index == free_index) index = free_index;
+    if (index == sizeof observed_contexts / sizeof observed_contexts[0]) {
+        index = free_index;
+    }
     if (index == sizeof observed_contexts / sizeof observed_contexts[0]) {
         caller("srv", "ctxfull", why);
         return;
@@ -1754,7 +1756,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H419");
+    caller("builder", "build", "H420");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

@@ -206,6 +206,19 @@ static uint32_t observer_u32(id object, const char *name, uint32_t fallback)
     @catch (id ignored) { return fallback; }
 }
 
+static uint32_t observer_u32_arg(id object, const char *name, uint32_t argument,
+                                 uint32_t fallback)
+{
+    if (!observer_is_u32(object, name)) return fallback;
+    SEL selector = sel_getUid(name);
+    @try {
+        return (uint32_t) ((unsigned long long (*)(id, SEL, uint32_t)) objc_msgSend)(
+            object, selector, argument);
+    } @catch (id ignored) {
+        return fallback;
+    }
+}
+
 static unsigned long long observer_u64(id object, const char *name, unsigned long long fallback)
 {
     if (!observer_is_u64(object, name)) return fallback;
@@ -260,7 +273,8 @@ static void dump_observer_encodings(const char *label, id object,
 
 /* A deliberately bounded read-only layer walk. Root CALayer.contents is not a
  * reliable scene indicator: remote contexts commonly put content in sublayers. */
-static void dump_layer_tree(id layer, unsigned depth, unsigned *visited)
+static void dump_layer_tree(id layer, unsigned depth, unsigned *visited,
+                            unsigned *nodes_with_contents)
 {
     if (!layer || depth > 3 || *visited >= 64) return;
     const unsigned index = (*visited)++;
@@ -270,6 +284,7 @@ static void dump_layer_tree(id layer, unsigned depth, unsigned *visited)
     const float opacity = observer_float(layer, "opacity", -1.0f);
     const bool opaque = observer_bool(layer, "isOpaque", false);
     id contents = observer_object(layer, "contents");
+    if (contents && nodes_with_contents) (*nodes_with_contents)++;
     id context = observer_object(layer, "context");
     const uint32_t contextId = observer_u32(layer, "contextId", UINT32_MAX);
     id sublayers = observer_object(layer, "sublayers");
@@ -286,8 +301,97 @@ static void dump_layer_tree(id layer, unsigned depth, unsigned *visited)
     for (unsigned long long child = 0; child < shown && *visited < 64; child++) {
         id sublayer = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(
             sublayers, @selector(objectAtIndex:), child);
-        dump_layer_tree(sublayer, depth + 1, visited);
+        dump_layer_tree(sublayer, depth + 1, visited, nodes_with_contents);
     }
+}
+
+/* H419: retain a small per-boot context table on the utility queue.  QuartzCore
+ * exposes context ids but not creation callbacks through the supported
+ * observation path, so "new" means first observed at one of the fixed samples.
+ * Ports are queried once for a new id, while later samples compare the layer
+ * root and content counts to identify updates without mutating CA state. */
+struct observer_context_state {
+    bool used;
+    uint32_t id;
+    uint32_t display_id;
+    uint32_t display_mask;
+    uint32_t hosting_id;
+    uint32_t client_port;
+    uint32_t task_name_port;
+    uintptr_t root;
+    unsigned root_sublayers;
+    unsigned tree_nodes;
+    unsigned contents_nodes;
+};
+
+static struct observer_context_state observed_contexts[8];
+
+static void
+observe_context_state(const char *why, id server, uint32_t id,
+                      uint32_t display_id, uint32_t display_mask,
+                      uintptr_t root, unsigned root_sublayers,
+                      unsigned tree_nodes, unsigned contents_nodes)
+{
+    unsigned free_index = sizeof observed_contexts / sizeof observed_contexts[0];
+    unsigned index = free_index;
+    for (unsigned cursor = 0;
+         cursor < sizeof observed_contexts / sizeof observed_contexts[0];
+         cursor++) {
+        if (observed_contexts[cursor].used &&
+            observed_contexts[cursor].id == id) {
+            index = cursor;
+            break;
+        }
+        if (!observed_contexts[cursor].used && free_index ==
+            sizeof observed_contexts / sizeof observed_contexts[0]) {
+            free_index = cursor;
+        }
+    }
+    if (index == free_index) index = free_index;
+    if (index == sizeof observed_contexts / sizeof observed_contexts[0]) {
+        caller("srv", "ctxfull", why);
+        return;
+    }
+
+    struct observer_context_state *state = &observed_contexts[index];
+    const bool is_new = !state->used;
+    const bool changed = !is_new &&
+        (state->display_id != display_id ||
+         state->display_mask != display_mask ||
+         state->root != root ||
+         state->root_sublayers != root_sublayers ||
+         state->tree_nodes != tree_nodes ||
+         state->contents_nodes != contents_nodes);
+    if (!is_new && !changed) return;
+
+    if (is_new) {
+        memset(state, 0, sizeof *state);
+        state->used = true;
+        state->id = id;
+        if (id != UINT32_MAX) {
+            state->hosting_id =
+                observer_u32_arg(server, "contextIdHostingContextId:", id, 0);
+            state->client_port =
+                observer_u32_arg(server, "clientPortOfContextId:", id, 0);
+            state->task_name_port =
+                observer_u32_arg(server, "taskNamePortOfContextId:", id, 0);
+        }
+    }
+    state->display_id = display_id;
+    state->display_mask = display_mask;
+    state->root = root;
+    state->root_sublayers = root_sublayers;
+    state->tree_nodes = tree_nodes;
+    state->contents_nodes = contents_nodes;
+
+    char detail[220];
+    snprintf(detail, sizeof detail,
+             "%s state=%s ctx=0x%x display=0x%x mask=0x%x host=0x%x client=0x%x task=0x%x root=0x%llx subs=%u nodes=%u contents=%u",
+             why, is_new ? "new" : "changed", id, display_id, display_mask,
+             state->hosting_id, state->client_port, state->task_name_port,
+             (unsigned long long) root, root_sublayers, tree_nodes,
+             contents_nodes);
+    caller("srv", "ctxchange", detail);
 }
 
 /* H236ht: the headless decision is two Objective-C return values inside
@@ -1351,10 +1455,14 @@ static void probe_display_frame(const char *why)
                 const unsigned long long subs = observer_u64(observer_object(clay, "sublayers"), "count", 0);
                 id contents = observer_object(clay, "contents");
                 const CGRect cb = observer_rect(clay, "bounds", CGRectMake(0, 0, 0, 0));
+                unsigned nodes_with_contents = 0;
+                unsigned visited = 0;
                 if (clay) {
-                    unsigned visited = 0;
-                    dump_layer_tree(clay, 0, &visited);
+                    dump_layer_tree(clay, 0, &visited, &nodes_with_contents);
                 }
+                observe_context_state(why, srv, cid, ctxDisplayId, displayMask,
+                                      (uintptr_t) clay, (unsigned) subs,
+                                      visited, nodes_with_contents);
                 char line[240];
                 snprintf(line, sizeof line,
                          "ctx[%llu] id=0x%x displayId=0x%x mask=0x%x layer=%.28s subs=%llu rootContents=%.28s renderContext=%.24s bounds=%.0fx%.0f",
@@ -1646,7 +1754,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H417");
+    caller("builder", "build", "H419");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

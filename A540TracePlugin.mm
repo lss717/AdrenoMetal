@@ -132,6 +132,164 @@ static void value(const char *cls, const char *sel, const char *name, unsigned l
     caller(cls, sel, detail);
 }
 
+/* H417: private QuartzCore APIs must be dispatched by their actual method
+ * encoding. A missing selector, an object return and a scalar zero are three
+ * different observations. In particular, 21H461's -[CADisplay pointScale]
+ * returns a 32-bit integer, not a double. */
+static Method observer_method(id object, const char *name)
+{
+    if (!object || !name) return NULL;
+    return class_getInstanceMethod(object_getClass(object), sel_getUid(name));
+}
+
+static const char *observer_encoding(id object, const char *name)
+{
+    Method method = observer_method(object, name);
+    return method ? method_getTypeEncoding(method) : NULL;
+}
+
+static bool observer_is_object(id object, const char *name)
+{
+    const char *encoding = observer_encoding(object, name);
+    return encoding && encoding[0] == '@';
+}
+
+static bool observer_is_u32(id object, const char *name)
+{
+    const char *encoding = observer_encoding(object, name);
+    return encoding && strchr("IiQqLlBc", encoding[0]) != NULL;
+}
+
+static bool observer_is_u64(id object, const char *name)
+{
+    const char *encoding = observer_encoding(object, name);
+    return encoding && strchr("QqLlIi", encoding[0]) != NULL;
+}
+
+static bool observer_is_double(id object, const char *name)
+{
+    const char *encoding = observer_encoding(object, name);
+    return encoding && encoding[0] == 'd';
+}
+
+static bool observer_is_float(id object, const char *name)
+{
+    const char *encoding = observer_encoding(object, name);
+    return encoding && encoding[0] == 'f';
+}
+
+static bool observer_is_bool(id object, const char *name)
+{
+    const char *encoding = observer_encoding(object, name);
+    return encoding && (encoding[0] == 'B' || encoding[0] == 'c');
+}
+
+static bool observer_is_rect(id object, const char *name)
+{
+    const char *encoding = observer_encoding(object, name);
+    return encoding && strncmp(encoding, "{CGRect=", 8) == 0;
+}
+
+static id observer_object(id object, const char *name)
+{
+    if (!observer_is_object(object, name)) return nil;
+    SEL selector = sel_getUid(name);
+    @try { return ((id (*)(id, SEL)) objc_msgSend)(object, selector); }
+    @catch (id ignored) { return nil; }
+}
+
+static uint32_t observer_u32(id object, const char *name, uint32_t fallback)
+{
+    if (!observer_is_u32(object, name)) return fallback;
+    SEL selector = sel_getUid(name);
+    @try { return (uint32_t) ((unsigned long long (*)(id, SEL)) objc_msgSend)(object, selector); }
+    @catch (id ignored) { return fallback; }
+}
+
+static unsigned long long observer_u64(id object, const char *name, unsigned long long fallback)
+{
+    if (!observer_is_u64(object, name)) return fallback;
+    SEL selector = sel_getUid(name);
+    @try { return ((unsigned long long (*)(id, SEL)) objc_msgSend)(object, selector); }
+    @catch (id ignored) { return fallback; }
+}
+
+static double observer_double(id object, const char *name, double fallback)
+{
+    if (!observer_is_double(object, name)) return fallback;
+    SEL selector = sel_getUid(name);
+    @try { return ((double (*)(id, SEL)) objc_msgSend)(object, selector); }
+    @catch (id ignored) { return fallback; }
+}
+
+static float observer_float(id object, const char *name, float fallback)
+{
+    if (!observer_is_float(object, name)) return fallback;
+    SEL selector = sel_getUid(name);
+    @try { return ((float (*)(id, SEL)) objc_msgSend)(object, selector); }
+    @catch (id ignored) { return fallback; }
+}
+
+static bool observer_bool(id object, const char *name, bool fallback)
+{
+    if (!observer_is_bool(object, name)) return fallback;
+    SEL selector = sel_getUid(name);
+    @try { return ((BOOL (*)(id, SEL)) objc_msgSend)(object, selector) != NO; }
+    @catch (id ignored) { return fallback; }
+}
+
+static CGRect observer_rect(id object, const char *name, CGRect fallback)
+{
+    if (!observer_is_rect(object, name)) return fallback;
+    SEL selector = sel_getUid(name);
+    @try { return ((CGRect (*)(id, SEL)) objc_msgSend)(object, selector); }
+    @catch (id ignored) { return fallback; }
+}
+
+static void dump_observer_encodings(const char *label, id object,
+                                    const char *const *names, unsigned count)
+{
+    char detail[184];
+    for (unsigned index = 0; index < count; index++) {
+        const char *encoding = observer_encoding(object, names[index]);
+        snprintf(detail, sizeof detail, "%s %s type=%s", label, names[index],
+                 encoding ? encoding : "UNSUPPORTED");
+        caller("enc", "method", detail);
+    }
+}
+
+/* A deliberately bounded read-only layer walk. Root CALayer.contents is not a
+ * reliable scene indicator: remote contexts commonly put content in sublayers. */
+static void dump_layer_tree(id layer, unsigned depth, unsigned *visited)
+{
+    if (!layer || depth > 3 || *visited >= 64) return;
+    const unsigned index = (*visited)++;
+    const CGRect frame = observer_rect(layer, "frame", CGRectMake(0, 0, 0, 0));
+    const CGRect bounds = observer_rect(layer, "bounds", CGRectMake(0, 0, 0, 0));
+    const bool hidden = observer_bool(layer, "hidden", false);
+    const float opacity = observer_float(layer, "opacity", -1.0f);
+    const bool opaque = observer_bool(layer, "isOpaque", false);
+    id contents = observer_object(layer, "contents");
+    id context = observer_object(layer, "context");
+    const uint32_t contextId = observer_u32(layer, "contextId", UINT32_MAX);
+    id sublayers = observer_object(layer, "sublayers");
+    const unsigned long long count = observer_is_u64(sublayers, "count")
+        ? observer_u64(sublayers, "count", 0) : 0;
+    char detail[184];
+    snprintf(detail, sizeof detail,
+             "depth=%u node=%u class=%.30s frame=%.0fx%.0f bounds=%.0fx%.0f hidden=%d opacity=%.3f opaque=%d contents=%.30s context=%d id=0x%x subs=%llu",
+             depth, index, object_getClassName(layer), frame.size.width, frame.size.height,
+             bounds.size.width, bounds.size.height, hidden ? 1 : 0, opacity, opaque ? 1 : 0,
+             contents ? object_getClassName(contents) : "-", context ? 1 : 0, contextId, count);
+    caller("layer", "tree", detail);
+    const unsigned long long shown = count < 8 ? count : 8;
+    for (unsigned long long child = 0; child < shown && *visited < 64; child++) {
+        id sublayer = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(
+            sublayers, @selector(objectAtIndex:), child);
+        dump_layer_tree(sublayer, depth + 1, visited);
+    }
+}
+
 /* H236ht: the headless decision is two Objective-C return values inside
  * backboardd (BKDisplayStartWindowServer 0x10003472c): +[CADisplay mainDisplay]
  * and -[CAWindowServer displayWithDisplayId:].  Static analysis proved that none
@@ -181,30 +339,30 @@ static void probe_displays(const char *why)
     if (!failure && displayList && displayCount) {
         @try {
             id entry = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(displayList, @selector(objectAtIndex:), 0ULL);
-            const SEL currentMode = NSSelectorFromString(@"currentMode");
+            static const char *const displayNames[] = {
+                "displayId", "bounds", "nativeSize", "pointScale", "currentMode", "name", "deviceName"
+            };
+            dump_observer_encodings("CADisplay", entry, displayNames,
+                                    (unsigned) (sizeof displayNames / sizeof displayNames[0]));
             id mode = nil;
-            if (entry && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(entry, @selector(respondsToSelector:), currentMode))
-                mode = ((id (*)(id, SEL)) objc_msgSend)(entry, currentMode);
+            if (observer_is_object(entry, "currentMode")) mode = observer_object(entry, "currentMode");
             if (!mode) { caller("ca", "mode", "no-mode-object"); }
             else {
-                /* CADisplayMode's getters, asked for one by one: the type of each is fixed but the
-                 * object may not implement all of them on every build. */
-                unsigned long long width = 0, height = 0, pixelWidth = 0, pixelHeight = 0;
-                double hz = 0;
-                for (NSString *name in @[@"width", @"height", @"pixelWidth", @"pixelHeight"]) {
-                    SEL sel = NSSelectorFromString(name);
-                    if (!((BOOL (*)(id, SEL, SEL)) objc_msgSend)(mode, @selector(respondsToSelector:), sel)) continue;
-                    const unsigned long long value = ((unsigned long long (*)(id, SEL)) objc_msgSend)(mode, sel);
-                    if ([name isEqualToString:@"width"]) width = value;
-                    else if ([name isEqualToString:@"height"]) height = value;
-                    else if ([name isEqualToString:@"pixelWidth"]) pixelWidth = value;
-                    else pixelHeight = value;
-                }
-                const SEL refresh = NSSelectorFromString(@"refreshRate");
-                if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(mode, @selector(respondsToSelector:), refresh))
-                    hz = ((double (*)(id, SEL)) objc_msgSend)(mode, refresh);
-                snprintf(detail, sizeof detail, "mode %llux%llu px=%llux%llu hz=%.3f",
-                         width, height, pixelWidth, pixelHeight, hz);
+                static const char *const modeNames[] = {
+                    "width", "height", "refreshRate", "preferredScale", "bitDepth",
+                    "pixelAspectRatio", "pixelWidth", "pixelHeight"
+                };
+                dump_observer_encodings("CADisplayMode", mode, modeNames,
+                                        (unsigned) (sizeof modeNames / sizeof modeNames[0]));
+                const unsigned long long width = observer_u64(mode, "width", UINT64_MAX);
+                const unsigned long long height = observer_u64(mode, "height", UINT64_MAX);
+                const double hz = observer_double(mode, "refreshRate", -1.0);
+                const uint32_t preferredScale = observer_u32(mode, "preferredScale", UINT32_MAX);
+                snprintf(detail, sizeof detail,
+                         "mode width=%llu height=%llu hz=%.3f preferredScale=%u pixelWidth=%s pixelHeight=%s",
+                         width, height, hz, preferredScale,
+                         observer_encoding(mode, "pixelWidth") ? "present" : "UNSUPPORTED",
+                         observer_encoding(mode, "pixelHeight") ? "present" : "UNSUPPORTED");
                 caller("ca", "mode", detail);
             }
         } @catch (NSException *exception) {
@@ -218,15 +376,16 @@ static void probe_displays(const char *why)
          * alone and the driver's published properties are read through IOKit. */
         @try {
             id entry = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(displayList, @selector(objectAtIndex:), 0ULL);
-            double pointScale = -1.0;
-            const SEL pointScaleSel = NSSelectorFromString(@"pointScale");
-            if (entry && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(entry, @selector(respondsToSelector:), pointScaleSel))
-                pointScale = ((double (*)(id, SEL)) objc_msgSend)(entry, pointScaleSel);
-            snprintf(detail, sizeof detail, "displayScale=%.3f", pointScale);
+            const uint32_t pointScale = observer_u32(entry, "pointScale", UINT32_MAX);
+            const uint32_t displayId = observer_u32(entry, "displayId", UINT32_MAX);
+            const char *pointEncoding = observer_encoding(entry, "pointScale");
+            snprintf(detail, sizeof detail, "displayId=0x%x pointScale=%u type=%s",
+                     displayId, pointScale, pointEncoding ? pointEncoding : "UNSUPPORTED");
             caller("ca", "scale", detail);
         } @catch (id ignored) { caller("ca", "scale", "exception"); }
         /* H236ih: whether the display driver published a default framebuffer surface.  A surface is what
-         * gives the compositor something to draw into; its absence also explains pixelWidth == 0.
+         * gives the compositor something to draw into.  H417 no longer treats an
+         * unsupported pixelWidth selector as a zero-valued mode property.
          * Reading the service's properties needs no driver call and no kernel change. */
         @try {
             io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NativeLegacyDisplay"));
@@ -255,17 +414,20 @@ static void probe_displays(const char *why)
             id displayed = serverList ? ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(serverList, @selector(objectAtIndex:), 0ULL) : nil;
             if (displayed) {
                 NSString *counters = nil;
-                for (NSString *selectorName in @[@"contexts", @"contextIds", @"clients", @"currentState"]) {
-                    SEL sel = NSSelectorFromString(selectorName);
-                    if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(displayed, @selector(respondsToSelector:), sel)) {
-                        id value = ((id (*)(id, SEL)) objc_msgSend)(displayed, sel);
+                for (NSString *selectorName in @[@"contexts", @"contextIds", @"clients"]) {
+                    if (observer_is_object(displayed, [selectorName UTF8String])) {
+                        id value = observer_object(displayed, [selectorName UTF8String]);
                         unsigned long long n = 0;
                         if (value && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(value, @selector(respondsToSelector:), @selector(count)))
                             n = ((unsigned long long (*)(id, SEL)) objc_msgSend)(value, @selector(count));
                         counters = [NSString stringWithFormat:@"%@ %@=%llu", counters ?: @"", selectorName, n];
                     }
                 }
-                snprintf(detail, sizeof detail, "server%s", counters ? [counters UTF8String] : " none");
+                const char *stateEncoding = observer_encoding(displayed, "currentState");
+                const uint32_t state = observer_u32(displayed, "currentState", UINT32_MAX);
+                snprintf(detail, sizeof detail, "server%s state=%u stateType=%s",
+                         counters ? [counters UTF8String] : " none", state,
+                         stateEncoding ? stateEncoding : "UNSUPPORTED");
                 caller("ca", "clients", detail);
             }
         } @catch (id ignored) { caller("ca", "clients", "exception"); }
@@ -275,26 +437,15 @@ static void probe_displays(const char *why)
         for (unsigned long long index = 0; index < shown; ++index) {
             id item = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(displayList, @selector(objectAtIndex:), index);
             if (!item) continue;
-            NSString *displayName = ((id (*)(id, SEL)) objc_msgSend)(item, @selector(name));
-            NSString *deviceName = nil;
-            if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(item, @selector(respondsToSelector:), @selector(deviceName)))
-                deviceName = ((id (*)(id, SEL)) objc_msgSend)(item, @selector(deviceName));
-            NSString *boundsText = nil;
-            if ([item respondsToSelector:NSSelectorFromString(@"valueForKey:")]) {
-                @try {
-                    NSValue *bounds = [item valueForKey:@"bounds"];
-                    if ([bounds isKindOfClass:[NSValue class]]) {
-                        CGRect rect;
-                        memset(&rect, 0, sizeof rect);
-                        [bounds getValue:&rect];
-                        boundsText = [NSString stringWithFormat:@"%.0fx%.0f", rect.size.width, rect.size.height];
-                    }
-                } @catch (id ignored) { boundsText = nil; }
-            }
-            snprintf(detail, sizeof detail, "list[%llu] name=%s device=%s bounds=%s",
-                     index, displayName ? [displayName UTF8String] : "nil",
+            NSString *displayName = observer_object(item, "name");
+            NSString *deviceName = observer_object(item, "deviceName");
+            const CGRect bounds = observer_rect(item, "bounds", CGRectMake(0, 0, 0, 0));
+            const uint32_t displayId = observer_u32(item, "displayId", UINT32_MAX);
+            const uint32_t pointScale = observer_u32(item, "pointScale", UINT32_MAX);
+            snprintf(detail, sizeof detail, "list[%llu] id=0x%x name=%s device=%s bounds=%.0fx%.0f scale=%u",
+                     index, displayId, displayName ? [displayName UTF8String] : "nil",
                      deviceName ? [deviceName UTF8String] : "nil",
-                     boundsText ? [boundsText UTF8String] : "?");
+                     bounds.size.width, bounds.size.height, pointScale);
             caller("ca", "display", detail);
         }
     }
@@ -364,7 +515,7 @@ static void read_springboard_log(void)
  * it.  The reference port found that a cached screen record with scale 0 keeps both the mode's
  * preferredScale and the primary display's pointScale at 0 even after the device tree says 3, so the
  * question "what does MG believe" is answered by looking at the file, not by calling MG. */
-static void probe_gestalt_cache(void)
+static void __attribute__((unused)) probe_gestalt_cache(void)
 {
     static bool once;
     if (once) return;
@@ -412,7 +563,7 @@ static void probe_gestalt_cache(void)
  * no daemon shows an abnormal kernel wait (§45.80), so the question is whether the service it is
  * calling is registered at all.  A missing bootstrap name answers that without touching the kernel:
  * BOOTSTRAP_UNKNOWN_SERVICE (0x44e) means the name was never registered in this namespace. */
-static void probe_services(void)
+static void __attribute__((unused)) probe_services(void)
 {
     static bool once;
     if (once) return;
@@ -472,7 +623,7 @@ static void probe_services(void)
 /* H236iq: com.apple.lsd is the one candidate that is not registered (0x44e) at ~220 s while lsd
  * itself runs with runnable threads, and SpringBoard waits on a synchronous reply.  This samples it
  * repeatedly so the log says whether the name ever appears, and when. */
-static void probe_lsd(unsigned round)
+static void __attribute__((unused)) probe_lsd(unsigned round)
 {
     static const char *const names[] = {
         "com.apple.lsd",
@@ -499,7 +650,7 @@ static void probe_lsd(unsigned round)
  * exists but the file does not (§45.81), and no candidate Mach service is missing, so this creates the
  * same initial metadata — only when absent, never overwriting — and reports the result.  It is persona
  * metadata, not a keybag secret. */
-static void fix_persona(void)
+static void __attribute__((unused)) fix_persona(void)
 {
     static bool once;
     if (once) return;
@@ -630,7 +781,7 @@ static const char *probe_self_name(void)
     return name;
 }
 
-static void probe_drawable(const char *why)
+static void __attribute__((unused)) probe_drawable(const char *why)
 {
     Class layerClass = NSClassFromString(@"CAMetalLayer");
     if (!layerClass) {
@@ -725,7 +876,7 @@ static void probe_drawable(const char *why)
  *
  * Every step is guarded: a context that will not build, a nil drawable or a
  * texture without a surface each produce one log line instead of an abort. */
-static void probe_first_frame(const char *why)
+static void __attribute__((unused)) probe_first_frame(const char *why)
 {
     Class layerClass = NSClassFromString(@"CAMetalLayer");
     Class contextClass = NSClassFromString(@"CAContext");
@@ -954,7 +1105,7 @@ static void dump_methods(const char *tag, Class cls, const char **words, unsigne
 /* H272q phase colours: the panel itself reports which write arrived last, so no
  * one has to remember the clock.  0xFF404040 = only the fill reached it,
  * 0xFFA0A0A0 = presentSurface returned, 0xFFF0F0F0 = the allContexts mount ran. */
-static void phase_fill(void *surface, uint32_t argb, const char *tag)
+static void __attribute__((unused)) phase_fill(void *surface, uint32_t argb, const char *tag)
 {
     void *(*base)(void *) = (void *(*)(void *)) dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddress");
     size_t (*alloc)(void *) = (size_t (*)(void *)) dlsym(RTLD_DEFAULT, "IOSurfaceGetAllocSize");
@@ -982,7 +1133,7 @@ static void offer_surface_to_display(void *surface, const char *sel);
  * FBSWorkspace and FBSSystemService do, so the scene objects are private subclasses reached
  * through the workspace.  Report the process, which FrontBoard classes exist, and - when a
  * workspace answers - every scene object by class name, identifier and context/layer. */
-static void probe_scenes(const char *why)
+static void __attribute__((unused)) probe_scenes(const char *why)
 {
     char detail[220];
     caller("scene", "proc", probe_self_name());
@@ -1055,15 +1206,9 @@ static void probe_display_frame(const char *why)
     }
     caller("disp", "enter", why);
     Class serverClass = NSClassFromString(@"CAWindowServer");
-    Class layerClass = NSClassFromString(@"CAMetalLayer");
-    if (!serverClass || !layerClass) {
+    if (!serverClass) {
         caller("disp", why, "no-class");
         return;
-    }
-    id device = nil;
-    id (*createDevice)(void) = (id (*)(void)) dlsym(RTLD_DEFAULT, "MTLCreateSystemDefaultDevice");
-    if (createDevice) {
-        @try { device = createDevice(); } @catch (id ignored) { device = nil; }
     }
     @try {
         id server = ((id (*)(id, SEL)) objc_msgSend)(serverClass, @selector(serverIfRunning));
@@ -1078,26 +1223,33 @@ static void probe_display_frame(const char *why)
             return;
         }
         id display = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(displays, @selector(objectAtIndex:), 0ULL);
-        CGRect bounds = CGRectMake(0, 0, 0, 0);
-        const SEL boundsSel = NSSelectorFromString(@"bounds");
-        if (display && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(display, @selector(respondsToSelector:), boundsSel)) {
-            bounds = ((CGRect (*)(id, SEL)) objc_msgSend)(display, boundsSel);
-        }
-        id context = nil;
-        const SEL contextSel = NSSelectorFromString(@"context");
-        if (display && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(display, @selector(respondsToSelector:), contextSel)) {
-            @try { context = ((id (*)(id, SEL)) objc_msgSend)(display, contextSel); }
-            @catch (NSException *exception) { caller("disp", "context", "exception"); }
-        }
+        CGRect bounds = observer_rect(display, "bounds", CGRectMake(0, 0, 0, 0));
+        id context = observer_object(display, "context");
+        const uint32_t displayId = observer_u32(display, "displayId", UINT32_MAX);
+        const uint32_t pointScale = observer_u32(display, "pointScale", UINT32_MAX);
         char detail[190];
-        snprintf(detail, sizeof detail, "%s comm=%s displays=%llu bounds=%.0fx%.0f ctx=%d",
-                 why, probe_self_name(), count, bounds.size.width, bounds.size.height, context ? 1 : 0);
+        snprintf(detail, sizeof detail, "%s comm=%s displays=%llu id=0x%x scale=%u bounds=%.0fx%.0f ctx=%d",
+                 why, probe_self_name(), count, displayId, pointScale,
+                 bounds.size.width, bounds.size.height, context ? 1 : 0);
         caller("disp", "server", detail);
         /* H272h: stop guessing.  Print what the real classes expose, then verify
          * behaviour for each candidate - existence in the list and a non-nil answer
          * are different things and the difference is the whole answer. */
         dump_class("disp", display);
         dump_class("server", server);
+        static const char *const serverNames[] = {
+            "serverIfRunning", "displays", "rendererFlags", "displayWithDisplayId:",
+            "displayWithUniqueId:", "displayWithName:", "contextIdHostingContextId:"
+        };
+        static const char *const displayNames[] = {
+            "displayId", "bounds", "pointScale", "currentMode", "context", "contextId",
+            "layer", "rootLayer", "displayLayer", "surface", "mainDisplay", "contexts",
+            "contextIds", "clients", "currentState", "displayMode"
+        };
+        dump_observer_encodings("CAWindowServer", server, serverNames,
+                                (unsigned) (sizeof serverNames / sizeof serverNames[0]));
+        dump_observer_encodings("CAWindowServerDisplay", display, displayNames,
+                                (unsigned) (sizeof displayNames / sizeof displayNames[0]));
         {
             static const char *words[] = {
                 "ontext", "ayer", "urface", "resent", "wap", "oot", "ost",
@@ -1118,14 +1270,20 @@ static void probe_display_frame(const char *why)
                 "surface", "mainDisplay", "contexts"
             };
             for (unsigned i = 0; i < sizeof candidates / sizeof candidates[0]; i++) {
-                const SEL sel = NSSelectorFromString([NSString stringWithUTF8String:candidates[i]]);
-                const BOOL has = ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(display, @selector(respondsToSelector:), sel);
-                id value = nil;
-                if (has) {
-                    @try { value = ((id (*)(id, SEL)) objc_msgSend)(display, sel); }
-                    @catch (NSException *exception) { value = nil; }
+                const char *encoding = observer_encoding(display, candidates[i]);
+                if (!encoding) {
+                    snprintf(detail, sizeof detail, "%s UNSUPPORTED", candidates[i]);
+                } else if (encoding[0] == '@') {
+                    id value = observer_object(display, candidates[i]);
+                    snprintf(detail, sizeof detail, "%s value=%d type=%s",
+                             candidates[i], value ? 1 : 0, encoding);
+                } else if (strchr("IiQqLlBc", encoding[0])) {
+                    const uint64_t value = observer_u64(display, candidates[i], UINT64_MAX);
+                    snprintf(detail, sizeof detail, "%s value=%llu type=%s",
+                             candidates[i], (unsigned long long) value, encoding);
+                } else {
+                    snprintf(detail, sizeof detail, "%s not-called type=%s", candidates[i], encoding);
                 }
-                snprintf(detail, sizeof detail, "%s has=%d value=%d", candidates[i], has ? 1 : 0, value ? 1 : 0);
                 caller("disp", "cand", detail);
             }
         }
@@ -1136,10 +1294,7 @@ static void probe_display_frame(const char *why)
             caller("disp", "context", "none, continue");
         }
         id root = nil;
-        const SEL layerSel = NSSelectorFromString(@"layer");
-        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(context, @selector(respondsToSelector:), layerSel)) {
-            root = ((id (*)(id, SEL)) objc_msgSend)(context, layerSel);
-        }
+        root = observer_object(context, "layer");
         snprintf(detail, sizeof detail, "%s root=%d rootclass=%.40s", why, root ? 1 : 0,
                  root ? object_getClassName(root) : "-");
         caller("disp", "root", detail);
@@ -1155,97 +1310,63 @@ static void probe_display_frame(const char *why)
          * carries a context/layer, its renderer flags, and how many CAContexts exist
          * with which layer class.  Read-only. */
         {
-            const SEL srvSel = NSSelectorFromString(@"serverIfRunning");
-            id srv = nil;
-            @try {
-                if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(serverClass, @selector(respondsToSelector:), srvSel)) {
-                    srv = ((id (*)(id, SEL)) objc_msgSend)(serverClass, srvSel);
-                }
-            } @catch (NSException *exception) { srv = nil; }
-            id displays = nil;
-            if (srv && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(srv, @selector(respondsToSelector:), NSSelectorFromString(@"displays"))) {
-                @try { displays = ((id (*)(id, SEL)) objc_msgSend)(srv, NSSelectorFromString(@"displays")); }
-                @catch (NSException *exception) { displays = nil; }
-            }
-            const unsigned long long n = displays
-                ? ((unsigned long long (*)(id, SEL)) objc_msgSend)(displays, @selector(count)) : 0;
+            id srv = observer_object(serverClass, "serverIfRunning");
+            id displays = observer_object(srv, "displays");
+            const unsigned long long n = observer_u64(displays, "count", 0);
             id d0 = n ? ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(displays, @selector(objectAtIndex:), 0) : nil;
-            id dctx = nil, dlayer = nil;
-            unsigned long long flags = 0;
-            if (d0 && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(d0, @selector(respondsToSelector:), NSSelectorFromString(@"context"))) {
-                @try { dctx = ((id (*)(id, SEL)) objc_msgSend)(d0, NSSelectorFromString(@"context")); }
-                @catch (NSException *exception) { dctx = nil; }
-            }
-            if (d0 && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(d0, @selector(respondsToSelector:), NSSelectorFromString(@"layer"))) {
-                @try { dlayer = ((id (*)(id, SEL)) objc_msgSend)(d0, NSSelectorFromString(@"layer")); }
-                @catch (NSException *exception) { dlayer = nil; }
-            }
-            if (srv && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(srv, @selector(respondsToSelector:), NSSelectorFromString(@"rendererFlags"))) {
-                @try { flags = ((unsigned long long (*)(id, SEL)) objc_msgSend)(srv, NSSelectorFromString(@"rendererFlags")); }
-                @catch (NSException *exception) { flags = 0; }
-            }
+            id dctx = observer_object(d0, "context");
+            id dlayer = observer_object(d0, "layer");
+            const unsigned long long flags = observer_u64(srv, "rendererFlags", UINT64_MAX);
+            const uint32_t d0id = observer_u32(d0, "displayId", UINT32_MAX);
+            const uint32_t d0scale = observer_u32(d0, "pointScale", UINT32_MAX);
+            const CGRect d0bounds = observer_rect(d0, "bounds", CGRectMake(0, 0, 0, 0));
             Class ctxCls = NSClassFromString(@"CAContext");
-            id all = nil;
-            if (ctxCls && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)((id) ctxCls, @selector(respondsToSelector:), NSSelectorFromString(@"allContexts"))) {
-                @try { all = ((id (*)(id, SEL)) objc_msgSend)((id) ctxCls, NSSelectorFromString(@"allContexts")); }
-                @catch (NSException *exception) { all = nil; }
-            }
-            const unsigned long long nctx = all
-                ? ((unsigned long long (*)(id, SEL)) objc_msgSend)(all, @selector(count)) : 0;
-            char state[200];
-            snprintf(state, sizeof state, "%s displays=%llu d0ctx=%d d0layer=%s renderer=%llu ctxs=%llu",
-                     why, n, dctx ? 1 : 0, dlayer ? object_getClassName(dlayer) : "-", flags, nctx);
+            static const char *const contextNames[] = {
+                "contextId", "displayMask", "displayId", "layer", "renderContext"
+            };
+            dump_observer_encodings("CAContext", (id) ctxCls, contextNames,
+                                    (unsigned) (sizeof contextNames / sizeof contextNames[0]));
+            id all = observer_object((id) ctxCls, "allContexts");
+            const unsigned long long nctx = observer_u64(all, "count", 0);
+            char state[240];
+            snprintf(state, sizeof state,
+                     "%s displays=%llu d0id=0x%x d0scale=%u d0bounds=%.0fx%.0f d0ctx=%d d0ctxType=%s d0layer=%s d0layerType=%s renderer=%llu ctxs=%llu",
+                     why, n, d0id, d0scale, d0bounds.size.width, d0bounds.size.height,
+                     dctx ? 1 : 0,
+                     observer_encoding(d0, "context") ? observer_encoding(d0, "context") : "UNSUPPORTED",
+                     dlayer ? object_getClassName(dlayer) : "-",
+                     observer_encoding(d0, "layer") ? observer_encoding(d0, "layer") : "UNSUPPORTED",
+                     flags, nctx);
             caller("srv", "state", state);
             /* H292: the display has no context while two exist.  Describe each one:
              * its id, client port, layer class, layer bounds, sublayer count and whether
              * the layer already carries contents.  Read-only. */
             for (unsigned long long i = 0; all && i < nctx && i < 3; ++i) {
                 id ctx = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(all, @selector(objectAtIndex:), i);
-                unsigned long long cid = 0;
-                unsigned long long port = 0;
-                id clay = nil;
-                if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(ctx, @selector(respondsToSelector:), NSSelectorFromString(@"contextId"))) {
-                    @try { cid = ((unsigned long long (*)(id, SEL)) objc_msgSend)(ctx, NSSelectorFromString(@"contextId")); }
-                    @catch (NSException *exception) { cid = 0; }
-                }
-                if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(ctx, @selector(respondsToSelector:), NSSelectorFromString(@"clientPort"))) {
-                    @try { port = ((unsigned long long (*)(id, SEL)) objc_msgSend)(ctx, NSSelectorFromString(@"clientPort")); }
-                    @catch (NSException *exception) { port = 0; }
-                }
-                if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(ctx, @selector(respondsToSelector:), NSSelectorFromString(@"layer"))) {
-                    @try { clay = ((id (*)(id, SEL)) objc_msgSend)(ctx, NSSelectorFromString(@"layer")); }
-                    @catch (NSException *exception) { clay = nil; }
-                }
-                unsigned long long subs = 0;
-                int contents = 0;
-                CGRect cb = CGRectMake(0, 0, 0, 0);
+                const uint32_t cid = observer_u32(ctx, "contextId", UINT32_MAX);
+                const uint32_t ctxDisplayId = observer_u32(ctx, "displayId", UINT32_MAX);
+                const uint32_t displayMask = observer_u32(ctx, "displayMask", UINT32_MAX);
+                id clay = observer_object(ctx, "layer");
+                id renderContext = observer_object(ctx, "renderContext");
+                const unsigned long long subs = observer_u64(observer_object(clay, "sublayers"), "count", 0);
+                id contents = observer_object(clay, "contents");
+                const CGRect cb = observer_rect(clay, "bounds", CGRectMake(0, 0, 0, 0));
                 if (clay) {
-                    if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(clay, @selector(respondsToSelector:), NSSelectorFromString(@"sublayers"))) {
-                        id sl = nil;
-                        @try { sl = ((id (*)(id, SEL)) objc_msgSend)(clay, NSSelectorFromString(@"sublayers")); }
-                        @catch (NSException *exception) { sl = nil; }
-                        if (sl) subs = ((unsigned long long (*)(id, SEL)) objc_msgSend)(sl, @selector(count));
-                    }
-                    if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(clay, @selector(respondsToSelector:), NSSelectorFromString(@"contents"))) {
-                        id c = nil;
-                        @try { c = ((id (*)(id, SEL)) objc_msgSend)(clay, NSSelectorFromString(@"contents")); }
-                        @catch (NSException *exception) { c = nil; }
-                        contents = c ? 1 : 0;
-                    }
-                    if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(clay, @selector(respondsToSelector:), NSSelectorFromString(@"bounds"))) {
-                        cb = ((CGRect (*)(id, SEL)) objc_msgSend)(clay, NSSelectorFromString(@"bounds"));
-                    }
+                    unsigned visited = 0;
+                    dump_layer_tree(clay, 0, &visited);
                 }
-                char line[200];
-                snprintf(line, sizeof line, "ctx[%llu] id=%llu port=0x%llx layer=%.28s subs=%llu contents=%d bounds=%.0fx%.0f",
-                         i, cid, port, clay ? object_getClassName(clay) : "-", subs, contents,
+                char line[240];
+                snprintf(line, sizeof line,
+                         "ctx[%llu] id=0x%x displayId=0x%x mask=0x%x layer=%.28s subs=%llu rootContents=%.28s renderContext=%.24s bounds=%.0fx%.0f",
+                         i, cid, ctxDisplayId, displayMask, clay ? object_getClassName(clay) : "-", subs,
+                         contents ? object_getClassName(contents) : "-",
+                         renderContext ? object_getClassName(renderContext) : "-",
                          cb.size.width, cb.size.height);
                 caller("srv", "ctx", line);
             }
-            /* H294: the two contexts are full-screen with a two-layer tree, yet the
-             * display carries none.  Bind the first context to display 0 once and record
-             * the outcome, then watch whether CoreAnimation starts to bind, draw and
-             * commit.  This is the only write this probe performs. */
+            /* H294's setContext: attempt is intentionally retired.  H416 is an
+             * observation-only candidate and must not bind a context, mutate the
+             * display, create a layer or synthesize a submission. */
             /* H296: the bind failed because setContext: does not exist on the display.
              * Dump the display and CAContext method tables once and ask the server what it
              * thinks of each context id, so the next attempt uses a real selector. */
@@ -1266,44 +1387,15 @@ static void probe_display_frame(const char *why)
                                      (unsigned) (sizeof bindWords / sizeof bindWords[0]));
                     }
                 }
-                const SEL portSel = NSSelectorFromString(@"clientPortOfContextId:");
-                if (srv && ((BOOL (*)(id, SEL, SEL)) objc_msgSend)(srv, @selector(respondsToSelector:), portSel)) {
-                    for (unsigned long long i = 0; all && i < nctx && i < 3; ++i) {
-                        id ctx = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(all, @selector(objectAtIndex:), i);
-                        unsigned long long cid = 0;
-                        if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(ctx, @selector(respondsToSelector:), NSSelectorFromString(@"contextId"))) {
-                            @try { cid = ((unsigned long long (*)(id, SEL)) objc_msgSend)(ctx, NSSelectorFromString(@"contextId")); }
-                            @catch (NSException *exception) { cid = 0; }
-                        }
-                        unsigned long long port = 0;
-                        @try { port = ((unsigned long long (*)(id, SEL, unsigned long long)) objc_msgSend)(srv, portSel, cid); }
-                        @catch (NSException *exception) { port = 0; }
-                        char pl[120];
-                        snprintf(pl, sizeof pl, "ctxid=%llu port=0x%llx", cid, port);
-                        caller("srv", "ports", pl);
-                    }
-                }
             }
-            static bool bound;
-            if (!bound && d0 && all && nctx > 0) {
-                bound = true;
-                id c0 = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(all, @selector(objectAtIndex:), 0);
-                const SEL setCtx = NSSelectorFromString(@"setContext:");
-                if (((BOOL (*)(id, SEL, SEL)) objc_msgSend)(d0, @selector(respondsToSelector:), setCtx)) {
-                    @try {
-                        ((void (*)(id, SEL, id)) objc_msgSend)(d0, setCtx, c0);
-                        caller("srv", "bind", "setContext=ok");
-                    } @catch (NSException *exception) {
-                        caller("srv", "bind", "exception");
-                    }
-                } else {
-                    caller("srv", "bind", "no-selector");
-                }
-            }
+            caller("srv", "bind", "skipped-observer-only");
         }
         caller("disp", "observe-only", why);
         return;
 
+#if 0
+        /* Retired diagnostic renderer.  Kept in history for auditability, but
+         * compiled out so it cannot create layers, fill IOSurfaces or present. */
         id layer = ((id (*)(id, SEL)) objc_msgSend)(((id (*)(id, SEL)) objc_msgSend)(layerClass, @selector(alloc)), @selector(init));
         if (!layer) {
             caller("disp", why, "layer=nil");
@@ -1522,6 +1614,7 @@ static void probe_display_frame(const char *why)
                 }
             }
         }
+#endif
     } @catch (NSException *exception) {
         char detail[170];
         snprintf(detail, sizeof detail, "%s exception %.80s: %.50s", why,
@@ -1548,12 +1641,12 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
      * Every path logs: a zero-line round must never be ambiguous again. */
     const char *name = getprogname();
     char detail[120];
-    snprintf(detail, sizeof detail, "comm=%s repeats=60..200/15s", name ? name : "?");
+    snprintf(detail, sizeof detail, "comm=%s observe_seconds=0,30,120,300", name ? name : "?");
     caller("builder", "load", detail);
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H297");
+    caller("builder", "build", "H417");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */
@@ -1592,82 +1685,25 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
         dump_class("ctxcls", (id) ctxClass);
         dump_methods("ctxmaker", object_getClass((id) ctxClass), NULL, 0);
     }
-    for (double delay = 60.0; delay <= 200.0; delay += 15.0) {
+    const double delays[] = {30.0, 120.0, 300.0};
+    for (double delay : delays) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            /* Stops by itself once a layer is attached (idempotent latch inside). */
-            probe_display_frame("early");
+            probe_displays("observer");
+            probe_display_frame("observer");
         });
     }
 }
 
 static void schedule_display_probes(void)
 {
-    static bool scheduled;
-    if (scheduled) return;
-    scheduled = true;
-    for (double delay = 2.0; delay <= 50.0; delay += 16.0) {
-        const int64_t nanos = (int64_t) (delay * 1e9);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, nanos), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            probe_displays("timer");
-            probe_services();
-        });
+    /* The bundle constructor owns the only fixed observation schedule.  Do not
+     * add device-init probes: they historically duplicated reads, invoked
+     * unrelated userland synchronization and made the schedule boot-dependent. */
+    static bool noted;
+    if (!noted) {
+        noted = true;
+        caller("builder", "device-init", "observer-schedule-owned-by-constructor");
     }
-    // H236iq: ten rounds ten seconds apart, so the log shows whether com.apple.lsd appears at all.
-    for (unsigned round = 0; round < 10; ++round) {
-        const int64_t lateness = (int64_t) ((30.0 + round * 10.0) * 1e9);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, lateness), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            probe_lsd(round);
-        });
-    }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (45.0 * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        fix_persona();
-    });
-    /* H279: the scene question, asked across the window where the render server and
-     * SpringBoard are both up. */
-    for (double delay = 120.0; delay <= 360.0; delay += 40.0) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            probe_scenes("timer");
-        });
-    }
-    /* H272: the layer question, asked three times: before the render server is up,
-     * while backboardd is stable, and past the ~192 s mark where the scene request
-     * sometimes appears. */
-    for (double delay = 40.0; delay <= 200.0; delay += 80.0) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            probe_drawable("timer");
-        });
-    }
-    /* H272b: the context/present walk starts later, once the render server has had
-     * a chance to publish a display, and repeats past the 189 s mark where
-     * SpringBoard only begins to talk. */
-    for (double delay = 120.0; delay <= 280.0; delay += 80.0) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            probe_first_frame("frame");
-            /* H272e: the display walk used to have its own dispatch_after(240 s), but
-             * the Metal device is only initialised at 213-289 s depending on the boot,
-             * so that timer landed past the end of the run.  Chain it instead: if the
-             * frame probe fired at all, the display probe fires in the same breath. */
-            probe_display_frame("disp");
-        });
-    }
-    /* H272d: the display-context walk.  Two attempts, both after the ~190 s mark where
-     * SpringBoard starts talking, so a failure is not confused with "not yet ready". */
-    for (double delay = 90.0; delay <= 170.0; delay += 80.0) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            probe_display_frame("disp");
-        });
-    }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (60.0 * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        probe_gestalt_cache();
-        /* H247: the forced restart resets SpringBoard's own startup at ~237 s and
-         * makes the natural boot sequence unobservable.  Disabled for this round. */
-        caller("ca", "restart", "skipped-h247");
-        for (double delay = 12.0; delay <= 60.0; delay += 16.0) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                probe_displays("after");
-            });
-        }
-    });
 }
 
 /** H236hi: Metal's assertion fires with no message we can see (backboardd is a
@@ -1815,7 +1851,7 @@ static uint32_t pm4_type7(uint32_t opcode, uint32_t count)
     return (3u << 30) | ((opcode & 0x7fu) << 16) | (count & 0x3fffu);
 }
 
-static void gpu_selftest(void)
+static void __attribute__((unused)) gpu_selftest(void)
 {
     char line[160];
     NativeAdrenoAbiParams params;
@@ -2641,12 +2677,9 @@ static id trace_architecture(void)
     // instance is offered again and the inventory follows if it is accepted.
     gDeviceInstance = self;
     caller("dev", "initWithAcceleratorPort:", "device=returned");
-    // H236hb: prove the plugin itself can drive the GPU from this process.
-    static bool tested;
-    if (!tested && gConnection) {
-        tested = true;
-        gpu_selftest();
-    }
+    /* H417 is observation-only.  Never run the historical GPU self-test: it
+     * issued work on the accelerator and would make later draw/commit evidence
+     * impossible to attribute to CoreAnimation. */
     schedule_display_probes();
     return self;
 }

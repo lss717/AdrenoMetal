@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H431 read-only SpringBoard scene observer. It is injected through the
+// H432 read-only SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -69,7 +69,7 @@ static void emit(const char *text)
     if (gConsole == -2) gConsole = open("/dev/console", O_WRONLY | O_NOCTTY);
     if (gConsole >= 0) {
         char output[kMaxLog + 24];
-        int length = snprintf(output, sizeof output, "H431_SBSCENE: %s\n", text);
+        int length = snprintf(output, sizeof output, "H432_SBSCENE: %s\n", text);
         if (length > 0) {
             size_t count = (size_t) length;
             if (count >= sizeof output) count = sizeof output - 1;
@@ -260,11 +260,11 @@ static void snapshot(const char *phase, unsigned sample)
          sample, application ? 1 : 0, class_name_or_nil(delegate), connectedCount, windowCount);
 }
 
-__attribute__((constructor)) static void h431_observer_constructor(void)
+__attribute__((constructor)) static void h432_observer_constructor(void)
 {
     const char *process = getprogname();
     if (!process || strcmp(process, "SpringBoard")) return;
-    line("observer load process=%s pid=%d build=H431", process, getpid());
+    line("observer load process=%s pid=%d build=H432", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0, 480.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),

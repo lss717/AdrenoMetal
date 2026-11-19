@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MIT
 //
-// H431 one-shot owner bootstrap. Launchd starts this from a non-essential
-// LaunchDaemon alias after the addon overlay is present. It exports the
-// observer through launchd's global environment and restarts SpringBoard once
-// so the already-running process picks up DYLD_INSERT_LIBRARIES.
+// H432 SpringBoard launch wrapper. Launchd runs this as the SpringBoard job.
+// The wrapper records that the overlaid job was consumed, installs the
+// observer only in its own environment, and execs the original binary.
 
 #include <Foundation/Foundation.h>
 #include <IOKit/IOKitLib.h>
@@ -19,6 +18,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -28,11 +28,13 @@ int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize
 int proc_name(int pid, void *buffer, uint32_t buffersize);
 }
 
-#define H431_PROC_ALL_PIDS 1
+#define H432_PROC_ALL_PIDS 1
 
 static const char kObserver[] =
     "/private/var/ngpu/lib/SpringBoardSceneObserver.dylib";
-static const char kOnce[] = "/tmp/h431-scenebootstrap.done";
+static const char kSpringBoard[] =
+    "/System/Library/CoreServices/SpringBoard.app/SpringBoard";
+static const char kOnce[] = "/tmp/h432-scenebootstrap.done";
 static const uint32_t kTunnelMagic = 0x4e544e4c;
 static const uint32_t kMethodLog = 17;
 static const uint32_t kMaxLog = 184;
@@ -74,7 +76,7 @@ static void line(const char *format, ...)
     if (gConsole == -2) gConsole = open("/dev/console", O_WRONLY | O_NOCTTY);
     if (gConsole >= 0) {
         char output[kMaxLog + 36];
-        int n = snprintf(output, sizeof output, "H431_SBBOOT: %s\n", text);
+        int n = snprintf(output, sizeof output, "H432_SBWRAP: %s\n", text);
         if (n > 0) {
             size_t count = (size_t) n;
             if (count >= sizeof output) count = sizeof output - 1;
@@ -99,7 +101,7 @@ static void line(const char *format, ...)
 static int find_process(const char *name)
 {
     int pids[4096];
-    int count = proc_listpids(H431_PROC_ALL_PIDS, 0, pids, sizeof pids);
+    int count = proc_listpids(H432_PROC_ALL_PIDS, 0, pids, sizeof pids);
     if (count <= 0) return 0;
     count /= sizeof pids[0];
     for (int i = 0; i < count; ++i) {
@@ -131,6 +133,24 @@ static void set_global_environment(void)
     line("launchctl flat status=%d", run("/bin/launchctl", flat));
 }
 
+static int launch_springboard(void)
+{
+    line("wrapper enter uid=%u euid=%u pid=%d", getuid(), geteuid(), getpid());
+    if (setenv("DYLD_INSERT_LIBRARIES", kObserver, 1) != 0) {
+        line("wrapper setenv insert failed errno=%d", errno);
+        return 1;
+    }
+    if (setenv("DYLD_FORCE_FLAT_NAMESPACE", "1", 1) != 0) {
+        line("wrapper setenv flat failed errno=%d", errno);
+        return 1;
+    }
+    line("wrapper exec target=%s", kSpringBoard);
+    char *arguments[] = { (char *) kSpringBoard, NULL };
+    execv(kSpringBoard, arguments);
+    line("wrapper exec failed errno=%d", errno);
+    return 1;
+}
+
 static bool terminate_springboard(int pid)
 {
     if (pid > 0 && kill(pid, SIGTERM) == 0) {
@@ -156,7 +176,7 @@ static bool terminate_springboard(int pid)
     @try {
         ((void (*)(id, SEL, id, unsigned long long, BOOL, id)) objc_msgSend)(
             service, terminate, @"com.apple.springboard", 1ull, YES,
-            @"H431 install SpringBoard scene observer");
+            @"H432 install SpringBoard scene observer");
         line("terminate service sent");
         return true;
     } @catch (id exception) {
@@ -165,16 +185,19 @@ static bool terminate_springboard(int pid)
     }
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     @autoreleasepool {
+        if (argc > 1 && !strcmp(argv[1], "--launch-springboard")) {
+            return launch_springboard();
+        }
         line("bootstrap enter uid=%u euid=%u pid=%d", getuid(), geteuid(), getpid());
         int once = open(kOnce, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
         if (once < 0) {
             line("bootstrap already claimed errno=%d", errno);
             return 0;
         }
-        (void) write(once, "H431\n", 5);
+        (void) write(once, "H432\n", 5);
         close(once);
 
         for (unsigned second = 0; second < 300; ++second) {

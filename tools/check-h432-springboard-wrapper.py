@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate H431's SpringBoard scene observer and one-shot bootstrap."""
+"""Validate H432's SpringBoard launch wrapper and scene observer."""
 
 from pathlib import Path
 
@@ -20,8 +20,8 @@ def main():
     observer = OBSERVER.read_text(encoding="utf-8")
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
 
-    require('caller("builder", "build", "H431");' in trace,
-            "H431 trace marker missing")
+    require('caller("builder", "build", "H432");' in trace,
+            "H432 trace marker missing")
     for marker in (
         'strcmp(process, "SpringBoard")',
         "FBSWorkspace",
@@ -31,9 +31,9 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H431",
+        "build=H432",
     ):
-        require(marker in observer, f"H431 observer missing: {marker}")
+        require(marker in observer, f"H432 observer missing: {marker}")
     for forbidden in (
         "NSSetUncaughtExceptionHandler",
         "requestSceneCreation",
@@ -42,20 +42,19 @@ def main():
         "class_addMethod",
     ):
         require(forbidden not in observer,
-                f"H431 observer is not read-only: {forbidden}")
+                f"H432 observer is not read-only: {forbidden}")
 
     for marker in (
-        "h431-scenebootstrap.done",
-        "launchctl",
+        "H432_SBWRAP",
+        'setenv("DYLD_INSERT_LIBRARIES"',
+        '"/System/Library/CoreServices/SpringBoard.app/SpringBoard"',
+        "execv(kSpringBoard, arguments)",
+        "--launch-springboard",
         "DYLD_INSERT_LIBRARIES",
         "SpringBoardSceneObserver.dylib",
-        "kill(pid, SIGTERM)",
-        "SpringBoard restarted",
     ):
-        require(marker in bootstrap, f"H431 bootstrap missing: {marker}")
-    require("O_CREAT | O_EXCL" in bootstrap,
-            "H431 bootstrap must be one-shot")
-    print("H431 SpringBoard scene injection gate: PASS")
+        require(marker in bootstrap, f"H432 wrapper missing: {marker}")
+    print("H432 SpringBoard launch wrapper gate: PASS")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate H434's adaptive cached-launchd wrapper and scene observer."""
+"""Validate H435's shell-trampoline cached launchd wrapper and observer."""
 
 from pathlib import Path
 
@@ -20,8 +20,8 @@ def main():
     observer = OBSERVER.read_text(encoding="utf-8")
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
 
-    require('caller("builder", "build", "H434");' in trace,
-            "H434 trace marker missing")
+    require('caller("builder", "build", "H435");' in trace,
+            "H435 trace marker missing")
     for marker in (
         'strcmp(process, "SpringBoard")',
         "FBSWorkspace",
@@ -31,9 +31,9 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H434",
+        "build=H435",
     ):
-        require(marker in observer, f"H434 observer missing: {marker}")
+        require(marker in observer, f"H435 observer missing: {marker}")
     for forbidden in (
         "NSSetUncaughtExceptionHandler",
         "requestSceneCreation",
@@ -42,10 +42,10 @@ def main():
         "class_addMethod",
     ):
         require(forbidden not in observer,
-                f"H434 observer is not read-only: {forbidden}")
+                f"H435 observer is not read-only: {forbidden}")
 
     for marker in (
-        "H434_SBWRAP",
+        "H435_SBWRAP",
         'setenv("DYLD_INSERT_LIBRARIES"',
         '"/System/Library/CoreServices/SpringBoard.app/SpringBoard"',
         "execv(kSpringBoard, arguments)",
@@ -53,8 +53,8 @@ def main():
         "DYLD_INSERT_LIBRARIES",
         "SpringBoardSceneObserver.dylib",
     ):
-        require(marker in bootstrap, f"H434 wrapper missing: {marker}")
-    print("H434 adaptive cached launchd wrapper gate: PASS")
+        require(marker in bootstrap, f"H435 wrapper missing: {marker}")
+    print("H435 shell-trampoline wrapper gate: PASS")
 
 
 if __name__ == "__main__":

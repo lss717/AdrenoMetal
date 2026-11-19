@@ -37,6 +37,7 @@
 #endif
 #include <ucontext.h>
 #include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 #include <dlfcn.h>
 #include <objc/message.h>
 #include <mach/task_special_ports.h>
@@ -1824,24 +1825,42 @@ static void schedule_display_probes(void)
 static void report_signal_image(const char *tag, unsigned long long pc)
 {
     if (!pc) return;
-    Dl_info info = {};
-    char line[320];
-    if (!dladdr((const void *)(uintptr_t) pc, &info) || !info.dli_fbase) {
-        snprintf(line, sizeof line, "image=%s pc=0x%llx state=unmapped", tag, pc);
+    const uint32_t count = _dyld_image_count();
+    for (uint32_t index = 0; index < count; ++index) {
+        const struct mach_header_64 *header =
+            (const struct mach_header_64 *) _dyld_get_image_header(index);
+        if (!header || header->magic != MH_MAGIC_64) continue;
+        const intptr_t slide = _dyld_get_image_vmaddr_slide(index);
+        const uint8_t *cursor = (const uint8_t *)(header + 1);
+        const uint8_t *end = cursor + header->sizeofcmds;
+        uintptr_t image_base = UINTPTR_MAX;
+        uintptr_t image_end = 0;
+        for (uint32_t command = 0; command < header->ncmds && cursor + sizeof(load_command) <= end; ++command) {
+            const load_command *lc = (const load_command *) cursor;
+            if (lc->cmdsize < sizeof(load_command) || cursor + lc->cmdsize > end) break;
+            if (lc->cmd == LC_SEGMENT_64) {
+                const segment_command_64 *seg = (const segment_command_64 *) cursor;
+                const uintptr_t start = (uintptr_t)(seg->vmaddr + slide);
+                const uintptr_t finish = (uintptr_t)(seg->vmaddr + seg->vmsize + slide);
+                if (start < image_base) image_base = start;
+                if (finish > image_end) image_end = finish;
+            }
+            cursor += lc->cmdsize;
+        }
+        if (pc < image_base || pc >= image_end) continue;
+        const char *file = _dyld_get_image_name(index);
+        const char *slash = file ? strrchr(file, '/') : NULL;
+        char line[320];
+        snprintf(line, sizeof line,
+                 "image=%s pc=0x%llx slide=0x%llx base=0x%llx off=0x%llx image_index=%u",
+                 file ? (slash ? slash + 1 : file) : "-", pc,
+                 (unsigned long long) slide, (unsigned long long) image_base,
+                 pc - image_base, index);
         emit(line);
         return;
     }
-    const uintptr_t base = (uintptr_t) info.dli_fbase;
-    const unsigned long long slide = (unsigned long long) _dyld_get_image_vmaddr_slide(0);
-    const char *file = info.dli_fname ? info.dli_fname : "-";
-    const char *slash = strrchr(file, '/');
-    const char *symbol = info.dli_sname ? info.dli_sname : "-";
-    const unsigned long long symbol_off = info.dli_saddr ?
-        pc - (unsigned long long)(uintptr_t) info.dli_saddr : 0;
-    snprintf(line, sizeof line,
-             "image=%s pc=0x%llx slide=0x%llx base=0x%llx off=0x%llx symbol=%s symoff=0x%llx",
-             slash ? slash + 1 : file, pc, slide, (unsigned long long) base,
-             pc >= base ? pc - base : 0, symbol, symbol_off);
+    char line[128];
+    snprintf(line, sizeof line, "image=%s pc=0x%llx state=unmapped", tag, pc);
     emit(line);
 }
 

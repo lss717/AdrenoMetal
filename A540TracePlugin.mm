@@ -38,13 +38,19 @@
 #include <ucontext.h>
 #include <mach-o/dyld.h>
 #include <dlfcn.h>
+#include <exception>
+#include <typeinfo>
+#include <cxxabi.h>
+#include <unwind.h>
 #include <objc/message.h>
+#include <objc/objc-exception.h>
 #include <mach/task_special_ports.h>
 #include <signal.h>
 /* <libproc.h> is not in the iOS SDK; these two libSystem calls are all the pid
  * scan needs. */
 extern "C" int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
 extern "C" int proc_name(int pid, void *buffer, uint32_t buffersize);
+extern "C" const char *getprogname(void);
 #define A540_PROC_ALL_PIDS 1
 /* <servers/bootstrap.h> is not in the iOS SDK; the call and the task's own
  * bootstrap port are all this probe needs. */
@@ -118,11 +124,33 @@ static void emit(const char *text)
     emit_raw(text);
 }
 
+/* Crash evidence must survive the normal 800-line trace budget.  The exception,
+ * terminate and signal reporters use this path only; ordinary selector tracing
+ * keeps the existing bounded budget. */
+static void emit_priority(const char *text)
+{
+    if (!gConnection && !connectAccelerator()) {
+        if (gPendingCount < kPendingLines) {
+            snprintf(gPending[gPendingCount], kMaxLog + 1, "%s", text);
+            gPendingCount++;
+        }
+        return;
+    }
+    if (gConnection) emit_raw(text);
+}
+
 static void caller(const char *cls, const char *sel, const char *detail)
 {
     char line[256];
     snprintf(line, sizeof line, "%s#%u %s %s", cls, ++gSequence, sel, detail ? detail : "");
     emit(line);
+}
+
+static void caller_priority(const char *cls, const char *sel, const char *detail)
+{
+    char line[256];
+    snprintf(line, sizeof line, "%s#%u %s %s", cls, ++gSequence, sel, detail ? detail : "");
+    emit_priority(line);
 }
 
 static void value(const char *cls, const char *sel, const char *name, unsigned long long v)
@@ -1738,10 +1766,6 @@ static void probe_display_frame(const char *why)
  * three runs died at ~157-209 s while the Metal device was only built at 213-289 s,
  * so a device-init-scheduled probe can never be reached.  Five attempts, 30 s apart,
  * all before the death window. */
-/* libSystem exports getprogname(), but the stdlib declaration is hidden behind
- * __DARWIN_C_FULL and this bundle builds with -std=c++17.  Declare it directly. */
-extern "C" const char *getprogname(void);
-
 __attribute__((constructor)) static void a540_early_display_probe(void)
 {
     /* H272g: no process gate.  +[CAWindowServer serverIfRunning] already returns nil
@@ -1756,7 +1780,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H425");
+    caller("builder", "build", "H426");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */
@@ -1816,11 +1840,11 @@ static void schedule_display_probes(void)
     }
 }
 
-/** H236hi: Metal's assertion fires with no message we can see (backboardd is a
- *  platform process; its stderr is not in the kernel log).  The plugin installs
- *  a signal handler that reports the fault address and the frame-pointer chain
- *  through the ABI log, so the aborting image and offset can be resolved
- *  offline against the extracted dyld cache. */
+/** H236hi/H426: Metal assertions and uncaught exceptions are invisible on the
+ *  platform processes' stderr.  The crash path is observed at three boundaries:
+ *  libobjc's throw preprocessor (first throw), Foundation's uncaught handler
+ *  (exception escaped), and std::terminate/signal (fatal endpoint).  Every hook
+ *  saves and calls the previous handler, and all stacks are fixed at 16 frames. */
 struct NativeDlInfo {
     const char *dli_fname;
     void *dli_fbase;
@@ -1829,6 +1853,166 @@ struct NativeDlInfo {
 };
 extern "C" int dladdr(const void *, struct NativeDlInfo *);
 
+static objc_exception_preprocessor gPreviousExceptionPreprocessor;
+static NSUncaughtExceptionHandler *gPreviousUncaughtExceptionHandler;
+static std::terminate_handler gPreviousTerminateHandler;
+static struct sigaction gPreviousSignalActions[NSIG];
+static volatile sig_atomic_t gSignalActionSaved[NSIG];
+static volatile sig_atomic_t gInSignalReport;
+static thread_local bool gInExceptionReport;
+static thread_local bool gInTerminateReport;
+static unsigned gExceptionReportCount;
+
+static bool exception_process_enabled(void)
+{
+    const char *name = getprogname();
+    return name && (!strcmp(name, "backboardd") || !strcmp(name, "mediaserverd") ||
+                    !strcmp(name, "SpringBoard"));
+}
+
+static void bounded_exception_text(id value, char *out, size_t size)
+{
+    if (!out || !size) return;
+    out[0] = 0;
+    if (!value) {
+        snprintf(out, size, "<nil>");
+        return;
+    }
+    @try {
+        if ([value isKindOfClass:[NSString class]]) {
+            const char *text = [(NSString *) value UTF8String];
+            snprintf(out, size, "%s", text ? text : "<null-utf8>");
+        } else {
+            Class cls = object_getClass(value);
+            snprintf(out, size, "<%s>", cls ? class_getName(cls) : "unknown");
+        }
+    } @catch (id ignored) {
+        snprintf(out, size, "<read-exception>");
+    }
+}
+
+static void bounded_exception_field(id exception, bool reason, char *out, size_t size)
+{
+    if (!out || !size) return;
+    out[0] = 0;
+    if (!exception) {
+        snprintf(out, size, "<nil>");
+        return;
+    }
+    @try {
+        bounded_exception_text(reason ? ((NSException *) exception).reason :
+                                       ((NSException *) exception).name, out, size);
+    } @catch (id ignored) {
+        snprintf(out, size, "<field-exception>");
+    }
+}
+
+struct ExceptionFrames {
+    uintptr_t pc[16];
+    unsigned count;
+};
+
+static _Unwind_Reason_Code collect_exception_frame(struct _Unwind_Context *context, void *opaque)
+{
+    ExceptionFrames *frames = (ExceptionFrames *) opaque;
+    const uintptr_t pc = _Unwind_GetIP(context);
+    if (pc) frames->pc[frames->count++] = pc;
+    if (frames->count == sizeof frames->pc / sizeof frames->pc[0]) return _URC_END_OF_STACK;
+    return _URC_NO_REASON;
+}
+
+static void report_unwind_stack(const char *tag)
+{
+    ExceptionFrames frames = {};
+    _Unwind_Backtrace(collect_exception_frame, &frames);
+    char line[192];
+    snprintf(line, sizeof line, "stack=%s frames=%u depth_limit=16", tag, frames.count);
+    emit_priority(line);
+    for (unsigned index = 0; index < frames.count; ++index) {
+        const uintptr_t pc = frames.pc[index];
+        NativeDlInfo info = {};
+        if (!dladdr((const void *) pc, &info) || !info.dli_fbase) {
+            snprintf(line, sizeof line, "%s_frame%u pc=0x%llx state=unmapped",
+                     tag, index, (unsigned long long) pc);
+            emit_priority(line);
+            continue;
+        }
+        const char *file = info.dli_fname ? info.dli_fname : "-";
+        const char *slash = strrchr(file, '/');
+        const char *symbol = info.dli_sname ? info.dli_sname : "-";
+        const uintptr_t base = (uintptr_t) info.dli_fbase;
+        const unsigned long long offset = pc >= base ? pc - base : 0;
+        snprintf(line, sizeof line,
+                 "%s_frame%u pc=0x%llx image=%.32s off=0x%llx symbol=%.40s",
+                 tag, index, (unsigned long long) pc, slash ? slash + 1 : file,
+                 offset, symbol);
+        emit_priority(line);
+    }
+}
+
+static void report_exception_event(const char *phase, id exception, void *returnAddress)
+{
+    if (!exception_process_enabled() || gInExceptionReport) return;
+    if (__atomic_fetch_add(&gExceptionReportCount, 1, __ATOMIC_RELAXED) >= 32) return;
+    gInExceptionReport = true;
+    char type[48], name[56], reason[72];
+    Class cls = exception ? object_getClass(exception) : Nil;
+    snprintf(type, sizeof type, "%s", cls ? class_getName(cls) : "<nil>");
+    bounded_exception_field(exception, false, name, sizeof name);
+    bounded_exception_field(exception, true, reason, sizeof reason);
+    char line[190];
+    snprintf(line, sizeof line, "class=%.44s name=%.48s reason=%.68s", type, name, reason);
+    caller_priority("exc", phase, line);
+    snprintf(line, sizeof line, "ra=0x%llx next=chain", (unsigned long long) (uintptr_t) returnAddress);
+    caller_priority("exc", "throw_ra", line);
+    report_unwind_stack(phase);
+    gInExceptionReport = false;
+}
+
+static id a540_exception_preprocessor(id exception)
+{
+    report_exception_event("throw", exception, __builtin_return_address(0));
+    if (gPreviousExceptionPreprocessor && gPreviousExceptionPreprocessor != a540_exception_preprocessor)
+        return gPreviousExceptionPreprocessor(exception);
+    return exception;
+}
+
+static void a540_uncaught_exception(NSException *exception)
+{
+    report_exception_event("uncaught", exception, __builtin_return_address(0));
+    if (gPreviousUncaughtExceptionHandler &&
+        gPreviousUncaughtExceptionHandler != a540_uncaught_exception)
+        gPreviousUncaughtExceptionHandler(exception);
+}
+
+static void a540_terminate_handler(void) noexcept
+{
+    if (exception_process_enabled() && !gInTerminateReport) {
+        gInTerminateReport = true;
+        const std::type_info *type = abi::__cxa_current_exception_type();
+        char line[160];
+        snprintf(line, sizeof line, "current=1 type=%s",
+                 type && type->name() ? type->name() : "<foreign-or-none>");
+        caller_priority("exc", "terminate", line);
+        report_unwind_stack("terminate");
+        gInTerminateReport = false;
+    }
+    if (gPreviousTerminateHandler && gPreviousTerminateHandler != a540_terminate_handler)
+        gPreviousTerminateHandler();
+    abort();
+}
+
+static void install_exception_reporters(void)
+{
+    static bool installed;
+    if (installed) return;
+    installed = true;
+    gPreviousExceptionPreprocessor = objc_setExceptionPreprocessor(a540_exception_preprocessor);
+    gPreviousUncaughtExceptionHandler = NSGetUncaughtExceptionHandler();
+    NSSetUncaughtExceptionHandler(a540_uncaught_exception);
+    gPreviousTerminateHandler = std::set_terminate(a540_terminate_handler);
+}
+
 static void report_signal_image(const char *tag, unsigned long long pc)
 {
     if (!pc) return;
@@ -1836,7 +2020,7 @@ static void report_signal_image(const char *tag, unsigned long long pc)
     char line[384];
     if (!dladdr((const void *)(uintptr_t)pc, &info) || !info.dli_fbase) {
         snprintf(line, sizeof line, "image=%s pc=0x%llx state=unmapped", tag, pc);
-        emit(line);
+        emit_priority(line);
         return;
     }
     const uintptr_t base = (uintptr_t)info.dli_fbase;
@@ -1851,11 +2035,31 @@ static void report_signal_image(const char *tag, unsigned long long pc)
              "image=%s pc=0x%llx slide=0x%llx base=0x%llx off=0x%llx symbol=%s symoff=0x%llx",
              slash ? slash + 1 : file, pc, slide, (unsigned long long)base,
              pc >= base ? pc - base : 0, symbol, symbol_off);
-    emit(line);
+    emit_priority(line);
+}
+
+static void report_return_site(const char *tag, id receiver, SEL selector, id result,
+                               void *returnAddress)
+{
+    Method method = receiver ? class_getInstanceMethod(object_getClass(receiver), selector) : NULL;
+    const char *types = method ? method_getTypeEncoding(method) : "?";
+    Class resultClass = result ? object_getClass(result) : Nil;
+    char line[184];
+    snprintf(line, sizeof line, "sel=%s types=%.32s result=%d class=%.44s",
+             selector ? sel_getName(selector) : "?", types, result ? 1 : 0,
+             resultClass ? class_getName(resultClass) : "nil");
+    caller_priority("return", tag, line);
+    report_signal_image("return_ra", (unsigned long long) (uintptr_t) returnAddress);
 }
 
 static void report_signal(int number, siginfo_t *info, void *context)
 {
+    if (gInSignalReport) {
+        signal(number, SIG_DFL);
+        raise(number);
+        _exit(128 + number);
+    }
+    gInSignalReport = 1;
     ucontext_t *state = (ucontext_t *) context;
     char line[184];
     unsigned long long pc = state ? (unsigned long long) state->uc_mcontext->__ss.__pc : 0;
@@ -1864,24 +2068,30 @@ static void report_signal(int number, siginfo_t *info, void *context)
     unsigned long long fp = state ? (unsigned long long) state->uc_mcontext->__ss.__fp : 0;
     snprintf(line, sizeof line, "signal=%d addr=0x%llx pc=0x%llx lr=0x%llx sp=0x%llx",
              number, (unsigned long long) (info ? (unsigned long long) (uintptr_t) info->si_addr : 0), pc, lr, sp);
-    emit(line);
+    emit_priority(line);
     report_signal_image("pc", pc);
     report_signal_image("lr", lr);
-    for (unsigned depth = 0; depth < 6 && fp; ++depth) {
+    for (unsigned depth = 0; depth < 16 && fp; ++depth) {
         const unsigned long long *frame = (const unsigned long long *) (uintptr_t) fp;
         const unsigned long long ret = frame ? (unsigned long long) frame[1] : 0;
         snprintf(line, sizeof line, "frame%d fp=0x%llx ret=0x%llx", depth, fp, ret);
-        emit(line);
+        emit_priority(line);
         {
             char tag[16];
             snprintf(tag, sizeof tag, "ret%d", depth);
             report_signal_image(tag, ret);
         }
         fp = frame ? frame[0] : 0;
-        if (sp && (fp < sp || fp - sp > 0x20000)) break;
+        if ((fp & 7) || (sp && (fp < sp || fp - sp > 0x40000))) break;
     }
-    signal(number, SIG_DFL);
+    if (number > 0 && number < NSIG && gSignalActionSaved[number]) {
+        const struct sigaction previous = gPreviousSignalActions[number];
+        sigaction(number, &previous, NULL);
+    } else {
+        signal(number, SIG_DFL);
+    }
     raise(number);
+    _exit(128 + number);
 }
 
 static void install_crash_reporter(void)
@@ -1893,9 +2103,13 @@ static void install_crash_reporter(void)
     memset(&action, 0, sizeof action);
     action.sa_sigaction = report_signal;
     action.sa_flags = SA_SIGINFO | SA_NODEFER;
-    sigaction(SIGABRT, &action, NULL);
-    sigaction(SIGSEGV, &action, NULL);
-    sigaction(SIGILL, &action, NULL);
+    const int signals[] = {SIGABRT, SIGSEGV, SIGILL};
+    for (unsigned index = 0; index < sizeof signals / sizeof signals[0]; ++index) {
+        const int number = signals[index];
+        if (sigaction(number, NULL, &gPreviousSignalActions[number]) == 0)
+            gSignalActionSaved[number] = 1;
+        sigaction(number, &action, NULL);
+    }
 }
 
 /* H272x: hand-off methods (0x7000..0x7003) are only served on a connection opened with
@@ -2188,6 +2402,9 @@ static id trace_object_of(const char *className, const char *kind);
         text[at++] = ':';
         for (unsigned index = 0; index < arguments; ++index) text[at++] = '@';
         text[at] = 0;
+        char detail[96];
+        snprintf(detail, sizeof detail, "sel=%s args=%u types=%s", name, arguments + 2, text);
+        caller("queue", "signature", detail);
         return [NSMethodSignature signatureWithObjCTypes:text];
     }
     return [super methodSignatureForSelector:selector];
@@ -2718,6 +2935,7 @@ static id trace_architecture(void)
 + (void)load
 {
     gLoaded = true;
+    install_exception_reporters();
     install_crash_reporter();
     // The crash address is only meaningful with the ASLR slide: every image in
     // the process (shared cache included) is moved by the same amount.
@@ -2892,8 +3110,18 @@ static id trace_architecture(void)
 
 - (id)newCommandQueue
 {
+    void *returnAddress = __builtin_return_address(0);
     A540TraceQueue *queue = [[A540TraceQueue alloc] init];
     gQueueInstance = queue;
+    report_return_site("newCommandQueue", self, _cmd, queue, returnAddress);
+    {
+        const bool conforms = class_conformsToProtocol(object_getClass(queue), @protocol(MTLCommandQueue));
+        char line[96];
+        snprintf(line, sizeof line, "class=%s commandQueueProtocol=%d",
+                 object_getClass(queue) ? class_getName(object_getClass(queue)) : "nil",
+                 conforms ? 1 : 0);
+        caller_priority("return", "queue_protocol", line);
+    }
     char detail[64];
     snprintf(detail, sizeof detail, "process=%s", [[[NSProcessInfo processInfo] processName] UTF8String]);
     caller("dev", "newCommandQueue", detail);
@@ -2902,7 +3130,9 @@ static id trace_architecture(void)
 
 - (id)newCommandQueueWithMaxCommandBufferCount:(unsigned long long)count
 {
+    void *returnAddress = __builtin_return_address(0);
     value("dev", "newCommandQueueWithMaxCommandBufferCount:", "count", count);
+    report_return_site("newCommandQueueWithMaxCommandBufferCount:", self, _cmd, nil, returnAddress);
     return nil;
 }
 

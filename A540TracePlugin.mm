@@ -1821,6 +1821,30 @@ static void schedule_display_probes(void)
  *  a signal handler that reports the fault address and the frame-pointer chain
  *  through the ABI log, so the aborting image and offset can be resolved
  *  offline against the extracted dyld cache. */
+static void report_signal_image(const char *tag, unsigned long long pc)
+{
+    if (!pc) return;
+    Dl_info info = {};
+    char line[320];
+    if (!dladdr((const void *)(uintptr_t) pc, &info) || !info.dli_fbase) {
+        snprintf(line, sizeof line, "image=%s pc=0x%llx state=unmapped", tag, pc);
+        emit(line);
+        return;
+    }
+    const uintptr_t base = (uintptr_t) info.dli_fbase;
+    const unsigned long long slide = (unsigned long long) _dyld_get_image_vmaddr_slide(0);
+    const char *file = info.dli_fname ? info.dli_fname : "-";
+    const char *slash = strrchr(file, '/');
+    const char *symbol = info.dli_sname ? info.dli_sname : "-";
+    const unsigned long long symbol_off = info.dli_saddr ?
+        pc - (unsigned long long)(uintptr_t) info.dli_saddr : 0;
+    snprintf(line, sizeof line,
+             "image=%s pc=0x%llx slide=0x%llx base=0x%llx off=0x%llx symbol=%s symoff=0x%llx",
+             slash ? slash + 1 : file, pc, slide, (unsigned long long) base,
+             pc >= base ? pc - base : 0, symbol, symbol_off);
+    emit(line);
+}
+
 static void report_signal(int number, siginfo_t *info, void *context)
 {
     ucontext_t *state = (ucontext_t *) context;
@@ -1832,11 +1856,18 @@ static void report_signal(int number, siginfo_t *info, void *context)
     snprintf(line, sizeof line, "signal=%d addr=0x%llx pc=0x%llx lr=0x%llx sp=0x%llx",
              number, (unsigned long long) (info ? (unsigned long long) (uintptr_t) info->si_addr : 0), pc, lr, sp);
     emit(line);
+    report_signal_image("pc", pc);
+    report_signal_image("lr", lr);
     for (unsigned depth = 0; depth < 6 && fp; ++depth) {
         const unsigned long long *frame = (const unsigned long long *) (uintptr_t) fp;
-        snprintf(line, sizeof line, "frame%d fp=0x%llx ret=0x%llx", depth, fp,
-                 frame ? (unsigned long long) frame[1] : 0);
+        const unsigned long long ret = frame ? (unsigned long long) frame[1] : 0;
+        snprintf(line, sizeof line, "frame%d fp=0x%llx ret=0x%llx", depth, fp, ret);
         emit(line);
+        {
+            char tag[16];
+            snprintf(tag, sizeof tag, "ret%d", depth);
+            report_signal_image(tag, ret);
+        }
         fp = frame ? frame[0] : 0;
         if (sp && (fp < sp || fp - sp > 0x20000)) break;
     }

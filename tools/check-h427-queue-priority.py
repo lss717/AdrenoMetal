@@ -15,8 +15,9 @@ def require(condition, message):
 
 def main():
     text = SOURCE.read_text(encoding="utf-8")
-    require('caller("builder", "build", "H427");' in text,
-            "H427 plugin marker missing")
+    require(any(f'caller("builder", "build", "{build}");' in text
+                for build in ("H427", "H428")),
+            "H427/H428 plugin marker missing")
     for marker in (
         "- (BOOL)setGPUPriority:(NSUInteger)priority",
         "- (BOOL)setBackgroundGPUPriority:(NSUInteger)priority",

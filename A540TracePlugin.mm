@@ -1782,7 +1782,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H427");
+    caller("builder", "build", "H428");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */
@@ -3183,6 +3183,33 @@ static id trace_architecture(void)
     id buffer = trace_object_of("_MTLBuffer", "buffer");
     struct TraceStorage *store = storage_for(buffer, true);
     if (store) store->length = length;
+    return buffer;
+}
+
+/* H428: CMMTLDevice forwards this standard Metal factory to the underlying
+ * device.  The wrapper raises NSInvalidArgumentException when the target does
+ * not respond, so return a traced _MTLBuffer and preserve the initial bytes
+ * for the stub's -contents query. */
+- (id)newBufferWithBytes:(const void *)pointer
+                  length:(NSUInteger)length
+                 options:(NSUInteger)options
+{
+    void *copy = NULL;
+    if (pointer && length) {
+        copy = malloc((size_t) length);
+        if (copy) memcpy(copy, pointer, (size_t) length);
+    }
+    char detail[160];
+    snprintf(detail, sizeof detail, "ptr=0x%llx length=%llu options=%llu copied=%d",
+             (unsigned long long) (uintptr_t) pointer, (unsigned long long) length,
+             (unsigned long long) options, copy ? 1 : 0);
+    caller("dev", "newBufferWithBytes:length:options:", detail);
+    id buffer = trace_object_of("_MTLBuffer", "buffer");
+    struct TraceStorage *store = storage_for(buffer, true);
+    if (store) {
+        store->length = length;
+        store->contents = copy;
+    }
     return buffer;
 }
 

@@ -16,8 +16,8 @@ def require(condition, message):
 def main():
     text = SOURCE.read_text(encoding="utf-8")
     require(any(f'caller("builder", "build", "{build}");' in text
-                for build in ("H430", "H431", "H432", "H433", "H434", "H435")),
-            "H430-H435 plugin marker missing")
+                for build in ("H430", "H431", "H432", "H433", "H434", "H435", "H436")),
+            "H430-H436 plugin marker missing")
     require("const double delays[] = {30.0, 120.0, 300.0, 480.0};" in text,
             "H430 did not add the post-BKS scene gate")
     require('if (process && !strcmp(process, "SpringBoard"))' in text,

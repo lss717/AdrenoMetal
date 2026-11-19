@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TRACE = ROOT / "A540TracePlugin.mm"
 OBSERVER = ROOT / "SpringBoardSceneObserver.mm"
-BOOTSTRAP = ROOT / "SceneBootstrap.cpp"
+BOOTSTRAP = ROOT / "SceneBootstrap.mm"
 
 
 def require(condition, message):

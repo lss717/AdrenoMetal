@@ -15,8 +15,9 @@ def require(condition, message):
 
 def main():
     text = SOURCE.read_text(encoding="utf-8")
-    require('caller("builder", "build", "H426");' in text,
-            "H426 plugin marker missing")
+    require(any(f'caller("builder", "build", "{build}");' in text
+                for build in ("H426", "H427")),
+            "H426/H427 plugin marker missing")
     for marker in (
         "#include <objc/objc-exception.h>",
         "objc_setExceptionPreprocessor(a540_exception_preprocessor)",

@@ -78,6 +78,8 @@ static unsigned gBudget = 800;
 static bool gLoaded;
 static id gDeviceInstance;
 static id gQueueInstance;
+static NSUInteger gTraceGPUPriority;
+static NSUInteger gTraceBackgroundGPUPriority;
 
 static bool connectAccelerator(void);
 
@@ -1780,7 +1782,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H426");
+    caller("builder", "build", "H427");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */
@@ -2326,6 +2328,10 @@ static id trace_object_of(const char *className, const char *kind);
  *  traced too.  It is an opaque object for Metal (a plugin builds both), and
  *  every selector the renderer sends that is not implemented is reported. */
 @interface A540TraceQueue : NSObject
+- (BOOL)setGPUPriority:(NSUInteger)priority;
+- (BOOL)setBackgroundGPUPriority:(NSUInteger)priority;
+- (NSUInteger)getGPUPriority;
+- (NSUInteger)getBackgroundGPUPriority;
 @end
 
 /* Private initialiser of _MTLCommandBuffer (Metal 0x187A7C318): the only place
@@ -2430,6 +2436,38 @@ static id trace_object_of(const char *className, const char *kind);
 - (void)setLabel:(id)label { caller("queue", "setLabel:", label ? "label=1" : "label=0"); }
 - (id)device { caller("queue", "device", ""); return gDeviceInstance; }
 - (unsigned long long)maxCommandBufferCount { caller("queue", "maxCommandBufferCount", ""); return 64; }
+
+/* H427: CMMTLCommandQueue forwards private queue-priority selectors to this
+ * object through forwardingTargetForSelector:.  The generic void-signature
+ * shim below is not sufficient because forwardingTargetForSelector: first asks
+ * the target whether it responds.  These four exact methods make the wrapper's
+ * forwarding contract valid; priorities are recorded as scheduling hints and
+ * do not alter command-buffer behavior. */
+- (BOOL)setGPUPriority:(NSUInteger)priority
+{
+    gTraceGPUPriority = priority;
+    value("queue", "setGPUPriority:", "priority", priority);
+    return YES;
+}
+
+- (BOOL)setBackgroundGPUPriority:(NSUInteger)priority
+{
+    gTraceBackgroundGPUPriority = priority;
+    value("queue", "setBackgroundGPUPriority:", "priority", priority);
+    return YES;
+}
+
+- (NSUInteger)getGPUPriority
+{
+    caller("queue", "getGPUPriority", "");
+    return gTraceGPUPriority;
+}
+
+- (NSUInteger)getBackgroundGPUPriority
+{
+    caller("queue", "getBackgroundGPUPriority", "");
+    return gTraceBackgroundGPUPriority;
+}
 /** H236gv: after -setLabel: Metal hands the queue its IO submission queue
  *  through this private setter; returning nil here (unimplemented) is exactly
  *  where it gave up.  The argument is recorded, nothing else. */

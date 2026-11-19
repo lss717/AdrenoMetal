@@ -15,8 +15,9 @@ def require(condition, message):
 
 def main():
     text = SOURCE.read_text(encoding="utf-8")
-    require('caller("builder", "build", "H429");' in text,
-            "H429 plugin marker missing")
+    require(any(f'caller("builder", "build", "{build}");' in text
+                for build in ("H429", "H430")),
+            "H429/H430 plugin marker missing")
     for marker in (
         "- (id)newHeapWithDescriptor:(id)descriptor",
         'caller("dev", "newHeapWithDescriptor:", detail);',

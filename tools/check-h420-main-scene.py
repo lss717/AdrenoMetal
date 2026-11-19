@@ -16,13 +16,15 @@ def require(condition, message):
 def main():
     text = SOURCE.read_text(encoding="utf-8")
     require(any(f'caller("builder", "build", "{build}");' in text
-                for build in ("H420", "H425", "H426", "H427", "H428", "H429")),
+                for build in ("H420", "H425", "H426", "H427", "H428", "H429", "H430")),
             "H420 plugin build marker missing")
     require("if (index == sizeof observed_contexts / sizeof observed_contexts[0]) {"
             in text, "context free-slot fix missing")
     require("if (index == free_index) index = free_index;" not in text,
             "H419 broken index comparison remains")
-    require("const double delays[] = {30.0, 120.0, 300.0};" in text,
+    require(any(schedule in text for schedule in (
+                "const double delays[] = {30.0, 120.0, 300.0};",
+                "const double delays[] = {30.0, 120.0, 300.0, 480.0};")),
             "fixed observation schedule changed")
     require("dispatch_get_global_queue(QOS_CLASS_UTILITY, 0)" in text,
             "observer is not on the utility queue")

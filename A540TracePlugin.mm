@@ -1782,7 +1782,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H429");
+    caller("builder", "build", "H430");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */
@@ -1821,11 +1821,14 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
         dump_class("ctxcls", (id) ctxClass);
         dump_methods("ctxmaker", object_getClass((id) ctxClass), NULL, 0);
     }
-    const double delays[] = {30.0, 120.0, 300.0};
+    const double delays[] = {30.0, 120.0, 300.0, 480.0};
     for (double delay : delays) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             probe_displays("observer");
             probe_display_frame("observer");
+            const char *process = getprogname();
+            if (process && !strcmp(process, "SpringBoard"))
+                probe_scenes("observer");
         });
     }
 }

@@ -37,7 +37,6 @@
 #endif
 #include <ucontext.h>
 #include <mach-o/dyld.h>
-#include <mach-o/loader.h>
 #include <dlfcn.h>
 #include <objc/message.h>
 #include <mach/task_special_ports.h>
@@ -1757,7 +1756,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H420");
+    caller("builder", "build", "H425");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */
@@ -1822,45 +1821,36 @@ static void schedule_display_probes(void)
  *  a signal handler that reports the fault address and the frame-pointer chain
  *  through the ABI log, so the aborting image and offset can be resolved
  *  offline against the extracted dyld cache. */
+struct NativeDlInfo {
+    const char *dli_fname;
+    void *dli_fbase;
+    const char *dli_sname;
+    void *dli_saddr;
+};
+extern "C" int dladdr(const void *, struct NativeDlInfo *);
+
 static void report_signal_image(const char *tag, unsigned long long pc)
 {
     if (!pc) return;
-    const uint32_t count = _dyld_image_count();
-    for (uint32_t index = 0; index < count; ++index) {
-        const struct mach_header_64 *header =
-            (const struct mach_header_64 *) _dyld_get_image_header(index);
-        if (!header || header->magic != MH_MAGIC_64) continue;
-        const intptr_t slide = _dyld_get_image_vmaddr_slide(index);
-        const uint8_t *cursor = (const uint8_t *)(header + 1);
-        const uint8_t *end = cursor + header->sizeofcmds;
-        uintptr_t image_base = UINTPTR_MAX;
-        uintptr_t image_end = 0;
-        for (uint32_t command = 0; command < header->ncmds && cursor + sizeof(load_command) <= end; ++command) {
-            const load_command *lc = (const load_command *) cursor;
-            if (lc->cmdsize < sizeof(load_command) || cursor + lc->cmdsize > end) break;
-            if (lc->cmd == LC_SEGMENT_64) {
-                const segment_command_64 *seg = (const segment_command_64 *) cursor;
-                const uintptr_t start = (uintptr_t)(seg->vmaddr + slide);
-                const uintptr_t finish = (uintptr_t)(seg->vmaddr + seg->vmsize + slide);
-                if (start < image_base) image_base = start;
-                if (finish > image_end) image_end = finish;
-            }
-            cursor += lc->cmdsize;
-        }
-        if (pc < image_base || pc >= image_end) continue;
-        const char *file = _dyld_get_image_name(index);
-        const char *slash = file ? strrchr(file, '/') : NULL;
-        char line[320];
-        snprintf(line, sizeof line,
-                 "image=%s pc=0x%llx slide=0x%llx base=0x%llx off=0x%llx image_index=%u",
-                 file ? (slash ? slash + 1 : file) : "-", pc,
-                 (unsigned long long) slide, (unsigned long long) image_base,
-                 pc - image_base, index);
+    NativeDlInfo info = {};
+    char line[384];
+    if (!dladdr((const void *)(uintptr_t)pc, &info) || !info.dli_fbase) {
+        snprintf(line, sizeof line, "image=%s pc=0x%llx state=unmapped", tag, pc);
         emit(line);
         return;
     }
-    char line[128];
-    snprintf(line, sizeof line, "image=%s pc=0x%llx state=unmapped", tag, pc);
+    const uintptr_t base = (uintptr_t)info.dli_fbase;
+    const unsigned long long slide =
+        (unsigned long long)_dyld_get_image_vmaddr_slide(0);
+    const char *file = info.dli_fname ? info.dli_fname : "-";
+    const char *slash = strrchr(file, '/');
+    const char *symbol = info.dli_sname ? info.dli_sname : "-";
+    const unsigned long long symbol_off = info.dli_saddr ?
+        pc - (unsigned long long)(uintptr_t)info.dli_saddr : 0;
+    snprintf(line, sizeof line,
+             "image=%s pc=0x%llx slide=0x%llx base=0x%llx off=0x%llx symbol=%s symoff=0x%llx",
+             slash ? slash + 1 : file, pc, slide, (unsigned long long)base,
+             pc >= base ? pc - base : 0, symbol, symbol_off);
     emit(line);
 }
 

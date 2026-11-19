@@ -15,7 +15,8 @@ def require(condition, message):
 
 def main():
     text = SOURCE.read_text(encoding="utf-8")
-    require('caller("builder", "build", "H420");' in text,
+    require('caller("builder", "build", "H420");' in text or
+            'caller("builder", "build", "H425");' in text,
             "H420 plugin build marker missing")
     require("if (index == sizeof observed_contexts / sizeof observed_contexts[0]) {"
             in text, "context free-slot fix missing")

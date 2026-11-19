@@ -1782,7 +1782,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H428");
+    caller("builder", "build", "H429");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */
@@ -3211,6 +3211,18 @@ static id trace_architecture(void)
         store->contents = copy;
     }
     return buffer;
+}
+
+/* H429: CMImaging also asks the wrapped device for a Metal heap.  Returning a
+ * traced non-nil `_MTLHeap` keeps the standard factory contract and lets the
+ * next concrete selector, if any, identify the remaining heap surface. */
+- (id)newHeapWithDescriptor:(id)descriptor
+{
+    char detail[96];
+    snprintf(detail, sizeof detail, "descriptor=%d class=%.48s",
+             descriptor ? 1 : 0, descriptor ? object_getClassName(descriptor) : "nil");
+    caller("dev", "newHeapWithDescriptor:", detail);
+    return trace_object_of("_MTLHeap", "heap");
 }
 
 /* H236hs: both texture entry points record the same descriptor fields; the

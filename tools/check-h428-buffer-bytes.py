@@ -15,8 +15,9 @@ def require(condition, message):
 
 def main():
     text = SOURCE.read_text(encoding="utf-8")
-    require('caller("builder", "build", "H428");' in text,
-            "H428 plugin marker missing")
+    require(any(f'caller("builder", "build", "{build}");' in text
+                for build in ("H428", "H429")),
+            "H428/H429 plugin marker missing")
     for marker in (
         "- (id)newBufferWithBytes:(const void *)pointer",
         "length:(NSUInteger)length",

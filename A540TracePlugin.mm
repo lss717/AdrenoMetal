@@ -1856,8 +1856,9 @@ extern "C" int dladdr(const void *, struct NativeDlInfo *);
 static objc_exception_preprocessor gPreviousExceptionPreprocessor;
 static NSUncaughtExceptionHandler *gPreviousUncaughtExceptionHandler;
 static std::terminate_handler gPreviousTerminateHandler;
-static struct sigaction gPreviousSignalActions[NSIG];
-static volatile sig_atomic_t gSignalActionSaved[NSIG];
+static const unsigned kSignalActionSlots = 64;
+static struct sigaction gPreviousSignalActions[kSignalActionSlots];
+static volatile sig_atomic_t gSignalActionSaved[kSignalActionSlots];
 static volatile sig_atomic_t gInSignalReport;
 static thread_local bool gInExceptionReport;
 static thread_local bool gInTerminateReport;
@@ -2084,7 +2085,7 @@ static void report_signal(int number, siginfo_t *info, void *context)
         fp = frame ? frame[0] : 0;
         if ((fp & 7) || (sp && (fp < sp || fp - sp > 0x40000))) break;
     }
-    if (number > 0 && number < NSIG && gSignalActionSaved[number]) {
+    if (number > 0 && (unsigned) number < kSignalActionSlots && gSignalActionSaved[number]) {
         const struct sigaction previous = gPreviousSignalActions[number];
         sigaction(number, &previous, NULL);
     } else {

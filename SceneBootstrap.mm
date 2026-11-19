@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H432 SpringBoard launch wrapper. Launchd runs this as the SpringBoard job.
+// H433 SpringBoard launch wrapper. Launchd runs this as the cached job.
 // The wrapper records that the overlaid job was consumed, installs the
 // observer only in its own environment, and execs the original binary.
 
@@ -28,7 +28,7 @@ int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize
 int proc_name(int pid, void *buffer, uint32_t buffersize);
 }
 
-#define H432_PROC_ALL_PIDS 1
+#define H433_PROC_ALL_PIDS 1
 
 static const char kObserver[] =
     "/private/var/ngpu/lib/SpringBoardSceneObserver.dylib";
@@ -76,7 +76,7 @@ static void line(const char *format, ...)
     if (gConsole == -2) gConsole = open("/dev/console", O_WRONLY | O_NOCTTY);
     if (gConsole >= 0) {
         char output[kMaxLog + 36];
-        int n = snprintf(output, sizeof output, "H432_SBWRAP: %s\n", text);
+        int n = snprintf(output, sizeof output, "H433_SBWRAP: %s\n", text);
         if (n > 0) {
             size_t count = (size_t) n;
             if (count >= sizeof output) count = sizeof output - 1;
@@ -101,7 +101,7 @@ static void line(const char *format, ...)
 static int find_process(const char *name)
 {
     int pids[4096];
-    int count = proc_listpids(H432_PROC_ALL_PIDS, 0, pids, sizeof pids);
+    int count = proc_listpids(H433_PROC_ALL_PIDS, 0, pids, sizeof pids);
     if (count <= 0) return 0;
     count /= sizeof pids[0];
     for (int i = 0; i < count; ++i) {
@@ -176,7 +176,7 @@ static bool terminate_springboard(int pid)
     @try {
         ((void (*)(id, SEL, id, unsigned long long, BOOL, id)) objc_msgSend)(
             service, terminate, @"com.apple.springboard", 1ull, YES,
-            @"H432 install SpringBoard scene observer");
+            @"H433 install SpringBoard scene observer");
         line("terminate service sent");
         return true;
     } @catch (id exception) {
@@ -197,7 +197,7 @@ int main(int argc, char **argv)
             line("bootstrap already claimed errno=%d", errno);
             return 0;
         }
-        (void) write(once, "H432\n", 5);
+        (void) write(once, "H433\n", 5);
         close(once);
 
         for (unsigned second = 0; second < 300; ++second) {

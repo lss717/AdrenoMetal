@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Adreno probe daemon: started by launchd from an owner job (a union view over /System/Library/LaunchDaemons, see the boot-time addon
+// Adreno probe daemon: can be started by launchd from an owner job in the cached launchd job set (see the H433 boot-time addon
 // mount), so it runs outside every sandbox profile. It waits for the Adreno accelerator service to appear, runs the shared userspace GPU
 // test once and exits. The result reaches the kernel through the driver's progress markers and SetMetadata.
 #include <stdlib.h>

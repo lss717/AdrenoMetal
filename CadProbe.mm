@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // H236hx: CADisplay probe for the SpringBoard session (staged as
 // /private/var/ngpu/bin/cadprobe and launched by /private/var/ngpu/daemons/com.unixnu.cadprobe.plist
-// through the kernel's addon mount over /System/Library/LaunchDaemons).
+// through the cached launchd job selected by H433).
 //
 // Why: QuartzCore's ensure_displays caches the first +[CADisplay displays] answer for the life of
 // the process (QuartzCore 0x18948d2c0), and query_displays returns an empty list with no log when

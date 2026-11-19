@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate H432's SpringBoard launch wrapper and scene observer."""
+"""Validate H433's cached launchd wrapper and scene observer."""
 
 from pathlib import Path
 
@@ -20,8 +20,8 @@ def main():
     observer = OBSERVER.read_text(encoding="utf-8")
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
 
-    require('caller("builder", "build", "H432");' in trace,
-            "H432 trace marker missing")
+    require('caller("builder", "build", "H433");' in trace,
+            "H433 trace marker missing")
     for marker in (
         'strcmp(process, "SpringBoard")',
         "FBSWorkspace",
@@ -31,9 +31,9 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H432",
+        "build=H433",
     ):
-        require(marker in observer, f"H432 observer missing: {marker}")
+        require(marker in observer, f"H433 observer missing: {marker}")
     for forbidden in (
         "NSSetUncaughtExceptionHandler",
         "requestSceneCreation",
@@ -42,10 +42,10 @@ def main():
         "class_addMethod",
     ):
         require(forbidden not in observer,
-                f"H432 observer is not read-only: {forbidden}")
+                f"H433 observer is not read-only: {forbidden}")
 
     for marker in (
-        "H432_SBWRAP",
+        "H433_SBWRAP",
         'setenv("DYLD_INSERT_LIBRARIES"',
         '"/System/Library/CoreServices/SpringBoard.app/SpringBoard"',
         "execv(kSpringBoard, arguments)",
@@ -53,8 +53,8 @@ def main():
         "DYLD_INSERT_LIBRARIES",
         "SpringBoardSceneObserver.dylib",
     ):
-        require(marker in bootstrap, f"H432 wrapper missing: {marker}")
-    print("H432 SpringBoard launch wrapper gate: PASS")
+        require(marker in bootstrap, f"H433 wrapper missing: {marker}")
+    print("H433 cached launchd wrapper gate: PASS")
 
 
 if __name__ == "__main__":

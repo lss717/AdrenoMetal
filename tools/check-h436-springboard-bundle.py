@@ -37,7 +37,7 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H502",
+        "build=H503",
         "if (sample == 0) {",
         "inventory_springboard_classes();",
         "probe_nonblocking_shared_instances();",
@@ -107,7 +107,7 @@ def main():
     ):
         require(forbidden not in bootstrap,
                 f"H483 wrapper retained one-shot behavior: {forbidden}")
-    print("H502 SpringBoard observer gate: PASS")
+    print("H503 SpringBoard observer gate: PASS")
 
 
 if __name__ == "__main__":

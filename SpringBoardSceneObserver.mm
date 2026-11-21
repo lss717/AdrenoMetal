@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H502 read-only SpringBoard scene observer. It is injected through the
+// H503 read-only SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -499,7 +499,7 @@ static void snapshot_window(const char *scope, unsigned index, id window,
              hasActivation ? 1 : 0, orientation, hasOrientation ? 1 : 0);
     }
     if (layer) log_object_field("window", index, layer, "contents");
-    if (sample >= 4)
+    if (sample == 5)
         snapshot_window_views(scope, index, window, rootViewController);
 }
 
@@ -535,7 +535,7 @@ static void snapshot(const char *phase, unsigned sample)
         inventory_springboard_classes();
         probe_nonblocking_shared_instances();
     }
-    if (sample >= 4) {
+    if (sample == 5) {
         gViewBudget = 96;
         gLayerBudget = 240;
         gHostContextCount = 0;
@@ -653,7 +653,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
     if (!process || strncmp(process, "SpringBoard", 11)) return;
-    line("observer load process=%s pid=%d build=H502", process, getpid());
+    line("observer load process=%s pid=%d build=H503", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0, 480.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),

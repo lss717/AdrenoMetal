@@ -19,7 +19,7 @@ def main() -> int:
     shim = SHIM.read_text(encoding="utf-8")
     for marker in (
         '"/private/var/ngpu/lib/LsdRecoveryAsync.dylib"',
-        '"/private/var/ngpu/bin/lsd.real"',
+        '"/System/Library/xpc/lsd.real"',
         'setenv("DYLD_INSERT_LIBRARIES", kShim, 1)',
         'setenv("DYLD_FORCE_FLAT_NAMESPACE", "1", 1)',
         'arguments[0] = (char *) "lsd"',
@@ -53,7 +53,7 @@ def main() -> int:
     ):
         require(forbidden not in shim,
                 "recovery shim exceeds its single operation: " + forbidden)
-    print("H518 lsd wrapper and recovery-async gate: PASS")
+    print("H519 lsd wrapper and recovery-async gate: PASS")
     return 0
 
 

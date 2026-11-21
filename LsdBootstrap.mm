@@ -16,7 +16,7 @@
 static const char kShim[] =
     "/private/var/ngpu/lib/LsdRecoveryAsync.dylib";
 static const char kLsd[] =
-    "/private/var/ngpu/bin/lsd.real";
+    "/System/Library/xpc/lsd.real";
 
 static void line(const char *format, ...) __attribute__((format(printf, 1, 2)));
 static void line(const char *format, ...)

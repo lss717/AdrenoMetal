@@ -44,7 +44,6 @@ static uintptr_t gLayerTrail[16];
 static unsigned gHostContextEventCount;
 static unsigned gContextLayerEventCount;
 static unsigned gTransactionEventCount;
-static unsigned gWindowLayerEventCount;
 static unsigned gWindowContentsEventCount;
 static unsigned gLayerCommitEventCount;
 static unsigned gWindowCommitCount[2];

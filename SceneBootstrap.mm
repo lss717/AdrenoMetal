@@ -108,7 +108,7 @@ static int launch_springboard(void)
     return 1;
 }
 
-int main(int argc, char **argv)
+int main(int argc __unused, char **argv __unused)
 {
     @autoreleasepool {
         line("bootstrap enter uid=%u euid=%u pid=%d", getuid(), geteuid(), getpid());

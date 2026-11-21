@@ -458,7 +458,7 @@ static void log_layer_event(const char *event, const char *kind, id layer)
     id superlayer = read_object(layer, "superlayer");
     id sublayers = normalized_collection(read_object(layer, "sublayers"));
     line("event=%s window=%s pid=%d layer=%p class=%s contents=%d class=%.24s delegate=%.24s super=%.24s sublayers=%llu committed=%llu hasCommitted=%d",
-         event, kind, getpid(), (void *) layer, class_name_or_nil(layer),
+         event, kind, getpid(), (__bridge void *) layer, class_name_or_nil(layer),
          contents ? 1 : 0, class_name_or_nil(contents),
          class_name_or_nil(delegate), class_name_or_nil(superlayer),
          collection_count(sublayers), hasCommitted, committed ? 1 : 0);
@@ -491,7 +491,7 @@ static void trace_layer_host_context_id(id self, SEL selector, uint32_t contextI
     unsigned long long contextObjectId = 0;
     const bool hasContextObjectId = read_integer(context, "contextId", &contextObjectId);
     line("event=ca_host_context_bind pid=%d layer=%p host=0x%x context=%d contextId=0x%x hasContextId=%d contextLayer=%.24s",
-         getpid(), (void *) self, (unsigned) contextId, context ? 1 : 0,
+         getpid(), (__bridge void *) self, (unsigned) contextId, context ? 1 : 0,
          (unsigned) contextObjectId, hasContextObjectId ? 1 : 0,
          class_name_or_nil(read_object(context, "layer")));
     log_layer_event("ca_host_context_layer", window_kind_for_layer(self), self);
@@ -504,7 +504,7 @@ static void trace_layer_host_visible(id self, SEL selector, BOOL visible)
     unsigned long long contextId = 0;
     const bool hasContextId = read_integer(self, "contextId", &contextId);
     line("event=ca_host_visible pid=%d visible=%d layer=%p host=0x%x hasContextId=%d window=%s",
-         getpid(), visible ? 1 : 0, (void *) self, (unsigned) contextId,
+         getpid(), visible ? 1 : 0, (__bridge void *) self, (unsigned) contextId,
          hasContextId ? 1 : 0, window_kind_for_layer(self));
 }
 
@@ -516,7 +516,7 @@ static void trace_context_set_layer(id self, SEL selector, id layer)
     unsigned long long contextId = 0;
     const bool hasContextId = read_integer(self, "contextId", &contextId);
     line("event=ca_context_set_layer pid=%d context=%p contextId=0x%x hasContextId=%d layer=%.28s",
-         getpid(), (void *) self, (unsigned) contextId, hasContextId ? 1 : 0,
+         getpid(), (__bridge void *) self, (unsigned) contextId, hasContextId ? 1 : 0,
          class_name_or_nil(layer));
     log_layer_event("ca_context_layer", window_kind_for_layer(layer), layer);
 }
@@ -529,7 +529,7 @@ static void trace_layer_set_contents(id self, SEL selector, id contents)
     ++gWindowContentsEventCount;
     id resolved = read_object(self, "contents");
     line("event=ca_layer_set_contents window=%s pid=%d layer=%p class=%s input=%.24s contents=%d resolved=%.24s",
-         kind, getpid(), (void *) self, class_name_or_nil(self),
+         kind, getpid(), (__bridge void *) self, class_name_or_nil(self),
          class_name_or_nil(contents), resolved ? 1 : 0,
          class_name_or_nil(resolved));
 }
@@ -554,7 +554,7 @@ static void trace_transaction_flush(id self, SEL selector)
     if (gTransactionEventCount >= 12) return;
     ++gTransactionEventCount;
     line("event=ca_transaction_flush pid=%d transaction=%p thread=%p contexts=%u hostEvents=%u layerCommits=%u",
-         getpid(), (void *) self, (void *) pthread_self(), gContextLayerEventCount,
+         getpid(), (__bridge void *) self, (void *) pthread_self(), gContextLayerEventCount,
          gHostContextEventCount, gLayerCommitEventCount);
 }
 

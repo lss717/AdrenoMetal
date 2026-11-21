@@ -530,7 +530,7 @@ static void trace_server_layer_commit(id self, SEL selector, id layer)
     char detail[220];
     snprintf(detail, sizeof detail,
              "layer=%p class=%s ctx=0x%x contents=%s owner=%d/%s",
-             self, object_getClassName(self), contextId,
+             (__bridge void *) self, object_getClassName(self), contextId,
              contents ? object_getClassName(contents) : "-",
              getpid(), getprogname() ? getprogname() : "?");
     caller("srv", "event_layer_commit", detail);

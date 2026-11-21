@@ -46,8 +46,13 @@ def main():
 
     for marker in (
         "H436_SBWRAP",
-        "build=H481",
+        "build=H483",
         'setenv("DYLD_INSERT_LIBRARIES"',
+        'getenv("DYLD_INSERT_LIBRARIES")',
+        'getenv("DYLD_FORCE_FLAT_NAMESPACE")',
+        "dlopen(kObserver, RTLD_NOW | RTLD_LOCAL)",
+        'line("wrapper dlopen observer ok")',
+        'line("wrapper dlopen observer failed error=%s"',
         '"/System/Library/CoreServices/SpringBoard.app/SpringBoard.real"',
         "execv(kSpringBoard, arguments)",
         "return launch_springboard()",
@@ -62,8 +67,8 @@ def main():
         "posix_spawn",
     ):
         require(forbidden not in bootstrap,
-                f"H481 wrapper retained one-shot behavior: {forbidden}")
-    print("H436 SpringBoard bundle wrapper gate: PASS")
+                f"H483 wrapper retained one-shot behavior: {forbidden}")
+    print("H483 SpringBoard bundle wrapper gate: PASS")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 //
-// H481 SpringBoard bundle wrapper. The original standard executable path is
-// overlaid; the wrapper installs the observer in its own environment and execs
-// the shipped signed copy in the same app bundle. It must do this on every
-// launch: launchd will respawn this path after a restart.
+// H483 SpringBoard bundle wrapper. The original standard executable path is
+// overlaid; the wrapper installs the observer in its own environment, checks
+// that the observer can be loaded in this process, and execs the shipped signed
+// copy in the same app bundle. It must do this on every launch: launchd will
+// respawn this path after a restart.
 
 #include <Foundation/Foundation.h>
 #include <IOKit/IOKitLib.h>
@@ -68,7 +69,7 @@ static void line(const char *format, ...)
     if (gConsole == -2) gConsole = open("/dev/console", O_WRONLY | O_NOCTTY);
     if (gConsole >= 0) {
         char output[kMaxLog + 36];
-        int n = snprintf(output, sizeof output, "H436_SBWRAP: build=H481 %s\n", text);
+        int n = snprintf(output, sizeof output, "H436_SBWRAP: build=H483 %s\n", text);
         if (n > 0) {
             size_t count = (size_t) n;
             if (count >= sizeof output) count = sizeof output - 1;
@@ -100,6 +101,17 @@ static int launch_springboard(void)
     if (setenv("DYLD_FORCE_FLAT_NAMESPACE", "1", 1) != 0) {
         line("wrapper setenv flat failed errno=%d", errno);
         return 1;
+    }
+    const char *insert = getenv("DYLD_INSERT_LIBRARIES");
+    const char *flat = getenv("DYLD_FORCE_FLAT_NAMESPACE");
+    line("wrapper env insert=%s", insert ? insert : "<null>");
+    line("wrapper env flat=%s", flat ? flat : "<null>");
+    void *observer = dlopen(kObserver, RTLD_NOW | RTLD_LOCAL);
+    if (observer) {
+        line("wrapper dlopen observer ok");
+    } else {
+        const char *error = dlerror();
+        line("wrapper dlopen observer failed error=%s", error ? error : "<null>");
     }
     line("wrapper exec target=%s", kSpringBoard);
     char *arguments[] = { (char *) kSpringBoard, NULL };

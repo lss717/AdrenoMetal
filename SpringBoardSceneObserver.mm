@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H515 SpringBoard scene observer. It is injected through the
+// H516 SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -55,8 +55,7 @@ static id gDidFinishLaunchingObserver;
 static id gWillEnterForegroundObserver;
 static id gDidBecomeActiveObserver;
 
-static void snapshot(const char *phase, unsigned sample);
-static void schedule_post_visibility_snapshot(void);
+static void snapshot(const char *phase, unsigned sample) __attribute__((unused));
 static void line(const char *format, ...) __attribute__((format(printf, 1, 2)));
 static const char *class_name_or_nil(id object);
 
@@ -534,7 +533,7 @@ static void trace_layer_host_visible(id self, SEL selector, BOOL visible)
     line("event=ca_host_visible pid=%d visible=%d layer=%p host=0x%x hasContextId=%d window=%s",
          getpid(), visible ? 1 : 0, (__bridge void *) self, (unsigned) contextId,
          hasContextId ? 1 : 0, kind);
-    if (visible && !strcmp(kind, "root")) schedule_post_visibility_snapshot();
+    (void) visible;
 }
 
 static void trace_context_set_layer(id self, SEL selector, id layer)
@@ -618,7 +617,7 @@ static void log_window_visibility(const char *event, id window, BOOL visible)
          hasVisible ? 1 : 0, class_name_or_nil(layer),
          class_name_or_nil(windowScene));
     if (layer) log_layer_event(event, kind, layer);
-    if (visible && !strcmp(kind, "root")) schedule_post_visibility_snapshot();
+    (void) visible;
 }
 
 static void trace_window_set_hidden(id self, SEL selector,
@@ -673,20 +672,6 @@ static void log_root_window_state(const char *phase)
              class_name_or_nil(windowScene), activation,
              hasActivation ? 1 : 0);
     }
-}
-
-static void schedule_post_visibility_snapshot(void)
-{
-    if (gVisibilitySnapshotScheduled) return;
-    gVisibilitySnapshotScheduled = true;
-    dispatch_after(
-        dispatch_time(DISPATCH_TIME_NOW, 2LL * NSEC_PER_SEC),
-        dispatch_get_main_queue(), ^{
-            log_root_window_state("post_visibility");
-            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                snapshot("springboard", 6);
-            });
-        });
 }
 
 static bool install_instance_hook(Class cls, const char *name,
@@ -1020,17 +1005,6 @@ static void snapshot(const char *phase, unsigned sample)
          sample, phase, getpid());
 }
 
-static void *sampling_worker(void *)
-{
-    line("sample=5 scheduler=pthread entered");
-    struct timespec delay = { .tv_sec = 480, .tv_nsec = 0 };
-    while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {
-    }
-    line("sample=5 scheduler=pthread awake");
-    snapshot("springboard", 5);
-    return nullptr;
-}
-
 __attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
@@ -1047,23 +1021,6 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
-    line("observer load process=%s pid=%d build=H515", process, getpid());
+    line("observer load process=%s pid=%d build=H516", process, getpid());
     install_application_notifications();
-    const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0 };
-    for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
-        line("event=h513_dispatch_scheduled sample=%u delay_seconds=%.0f pid=%d",
-             index, delays[index], getpid());
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),
-                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            line("event=h513_dispatch_closure_enter sample=%u pid=%d",
-                 index, getpid());
-            snapshot("springboard", index);
-            line("event=h513_dispatch_closure_exit sample=%u pid=%d",
-                 index, getpid());
-        });
-    }
-    pthread_t worker;
-    int result = pthread_create(&worker, nullptr, sampling_worker, nullptr);
-    line("sample=5 scheduler=pthread_create rc=%d", result);
-    if (result == 0) pthread_detach(worker);
 }

@@ -20,8 +20,8 @@ def main():
     observer = OBSERVER.read_text(encoding="utf-8")
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
 
-    require('caller("builder", "build", "H515");' in trace,
-            "H515 trace marker missing")
+    require('caller("builder", "build", "H516");' in trace,
+            "H516 trace marker missing")
     for marker in (
         "state->owner_status = pid_for_task(",
         'proc_name(state->owner_pid, state->owner_name',
@@ -43,7 +43,7 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H515",
+        "build=H516",
         "if (sample == 0) {",
         "inventory_springboard_classes();",
         "probe_nonblocking_shared_instances();",
@@ -69,10 +69,6 @@ def main():
         '"preservesFlip"',
         '"applicationState"',
         '"activationState"',
-        "pthread_create(&worker, nullptr, sampling_worker, nullptr)",
-        'line("sample=5 scheduler=pthread entered");',
-        'line("sample=5 scheduler=pthread awake");',
-        'snapshot("springboard", 5);',
         'install_ca_event_hooks();',
         'event=ca_host_context_bind',
         'event=ca_host_visible',
@@ -89,18 +85,12 @@ def main():
         'event=h513_constructor_enter',
         'event=h513_constructor_skip',
         'event=h513_constructor_accepted',
-        'event=h513_dispatch_scheduled',
-        'event=h513_dispatch_closure_enter',
-        'event=h513_dispatch_closure_exit',
         'event=h513_snapshot_enter',
         'event=h513_dlopen',
         'event=h513_snapshot_exit',
         'event=h515_shared_application_enter',
         'event=h515_shared_application_return',
         'event=h515_application_notification',
-        'schedule_post_visibility_snapshot();',
-        'snapshot("springboard", 6);',
-        'if (sample == 4 || sample == 5 || sample == 6)',
         '"sharedInstanceIfExists"',
         "class_copyMethodList(object_getClass(cls), &methodCount)",
         'line("sbinventory begin")',
@@ -117,6 +107,8 @@ def main():
         "setScene",
         "class_addMethod",
         "probe_context_server(",
+        "dispatch_after(",
+        "pthread_create(",
     ):
         require(forbidden not in observer,
                 f"H436 observer is not read-only: {forbidden}")
@@ -145,7 +137,7 @@ def main():
     ):
         require(forbidden not in bootstrap,
                 f"H483 wrapper retained one-shot behavior: {forbidden}")
-    print("H515 SpringBoard observer gate: PASS")
+    print("H516 SpringBoard observer gate: PASS")
 
 
 if __name__ == "__main__":

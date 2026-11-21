@@ -31,7 +31,12 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H487",
+        "build=H488",
+        "probe_springboard_classes(sample)",
+        '"SBMainWorkspace"',
+        '"SBMainDisplaySceneManager"',
+        '"SBSceneManagerCoordinator"',
+        '"SBWindowSceneManager"',
     ):
         require(marker in observer, f"H436 observer missing: {marker}")
     for forbidden in (
@@ -68,7 +73,7 @@ def main():
     ):
         require(forbidden not in bootstrap,
                 f"H483 wrapper retained one-shot behavior: {forbidden}")
-    print("H487 SpringBoard observer gate: PASS")
+    print("H488 SpringBoard observer gate: PASS")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H487 read-only SpringBoard scene observer. It is injected through the
+// H488 read-only SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -30,7 +30,7 @@ static const uint32_t kMaxLog = 184;
 
 static io_connect_t gConnection;
 static uint32_t gSelector;
-static unsigned gBudget = 120;
+static unsigned gBudget = 512;
 static int gConsole = -2;
 
 extern "C" {
@@ -155,6 +155,63 @@ static const char *class_name_or_nil(id object)
     return object ? object_getClassName(object) : "nil";
 }
 
+static id call_object_selector(id object, const char *name)
+{
+    if (!object || !name) return nil;
+    SEL selector = sel_getUid(name);
+    if (![(id) object respondsToSelector:selector]) return nil;
+    @try {
+        return ((id (*)(id, SEL)) objc_msgSend)((id) object, selector);
+    } @catch (id ignored) {
+        return nil;
+    }
+}
+
+static void probe_shared_class(const char *name, const char *const *selectors,
+                               unsigned count)
+{
+    Class cls = NSClassFromString([NSString stringWithUTF8String:name]);
+    line("sbclass name=%s exists=%d", name, cls ? 1 : 0);
+    if (!cls) return;
+    for (unsigned index = 0; index < count; ++index) {
+        SEL selector = sel_getUid(selectors[index]);
+        if (![(id) cls respondsToSelector:selector]) continue;
+        id value = call_object_selector((id) cls, selectors[index]);
+        line("sbclass name=%s selector=%s value=%d class=%s",
+             name, selectors[index], value ? 1 : 0, class_name_or_nil(value));
+    }
+}
+
+static void probe_springboard_classes(unsigned sample)
+{
+    static const char *const workspace[] = {
+        "_sharedInstance", "sharedInstance", "mainWorkspace", "_mainWorkspace"
+    };
+    static const char *const coordinator[] = { "_sharedInstance", "sharedInstance" };
+    static const char *const sceneManager[] = {
+        "_sharedInstance", "sharedInstance", "mainDisplaySceneManager",
+        "_mainDisplaySceneManager"
+    };
+    static const char *const windowScene[] = {
+        "_sharedInstance", "sharedInstance", "activeDisplayWindowScene",
+        "_activeDisplayWindowScene", "mainDisplayWindowScene",
+        "_mainDisplayWindowScene"
+    };
+    line("sbprobe sample=%u", sample);
+    probe_shared_class("SBMainWorkspace", workspace,
+                       sizeof workspace / sizeof workspace[0]);
+    probe_shared_class("SBSceneManagerCoordinator", coordinator,
+                       sizeof coordinator / sizeof coordinator[0]);
+    probe_shared_class("SBMainDisplaySceneManager", sceneManager,
+                       sizeof sceneManager / sizeof sceneManager[0]);
+    probe_shared_class("SBWindowSceneManager", windowScene,
+                       sizeof windowScene / sizeof windowScene[0]);
+    probe_shared_class("SBApplicationController", coordinator,
+                       sizeof coordinator / sizeof coordinator[0]);
+    probe_shared_class("FBSceneManager", coordinator,
+                       sizeof coordinator / sizeof coordinator[0]);
+}
+
 static id normalized_collection(id collection)
 {
     if (!collection) return nil;
@@ -178,6 +235,7 @@ static void snapshot(const char *phase, unsigned sample)
 
     Class workspaceClass = NSClassFromString(@"FBSWorkspace");
     Class sceneClass = NSClassFromString(@"FBScene");
+    probe_springboard_classes(sample);
     line("sample=%u phase=%s pid=%d workspaceClass=%d sceneClass=%d",
          sample, phase, getpid(), workspaceClass ? 1 : 0, sceneClass ? 1 : 0);
 
@@ -263,7 +321,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
     if (!process || strncmp(process, "SpringBoard", 11)) return;
-    line("observer load process=%s pid=%d build=H487", process, getpid());
+    line("observer load process=%s pid=%d build=H488", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0, 480.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),

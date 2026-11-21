@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H496 read-only SpringBoard scene observer. It is injected through the
+// H497 read-only SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -35,6 +35,8 @@ static unsigned gBudget = 1024;
 static int gConsole = -2;
 static unsigned gViewBudget;
 static unsigned gLayerBudget;
+static uint32_t gHostContextIds[8];
+static unsigned gHostContextCount;
 
 extern "C" {
 int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
@@ -281,6 +283,18 @@ static void log_object_field(const char *scope, unsigned index, id scene, const 
          value ? 1 : 0, class_name_or_nil(value));
 }
 
+static bool first_host_context(uint32_t contextId)
+{
+    if (!contextId) return false;
+    for (unsigned index = 0; index < gHostContextCount; ++index) {
+        if (gHostContextIds[index] == contextId) return false;
+    }
+    if (gHostContextCount == sizeof gHostContextIds / sizeof gHostContextIds[0])
+        return false;
+    gHostContextIds[gHostContextCount++] = contextId;
+    return true;
+}
+
 static void snapshot_layer_tree(const char *scope, unsigned windowIndex,
                                 unsigned viewIndex, id layer, unsigned depth,
                                 unsigned *budget)
@@ -302,6 +316,34 @@ static void snapshot_layer_tree(const char *scope, unsigned windowIndex,
              scope, windowIndex, viewIndex, depth, layerClass,
              (unsigned) contextId, hasContextId ? 1 : 0,
              context ? 1 : 0, class_name_or_nil(context));
+        if (context && first_host_context((uint32_t) contextId)) {
+            unsigned long long observedId = 0;
+            unsigned long long observedDisplay = 0;
+            unsigned long long observedMask = 0;
+            unsigned long long valid = 0;
+            unsigned long long frozen = 0;
+            const bool hasObservedId = read_integer(context, "contextId", &observedId);
+            const bool hasObservedDisplay = read_integer(context, "displayId", &observedDisplay);
+            const bool hasObservedMask = read_integer(context, "displayMask", &observedMask);
+            const bool hasValid = read_integer(context, "isValid", &valid);
+            const bool hasFrozen = read_integer(context, "isFrozen", &frozen);
+            id contextLayer = read_object(context, "layer");
+            id renderContext = read_object(context, "renderContext");
+            id options = read_object(context, "options");
+            line("hierarchy=context scope=%s/%u host=0x%x id=0x%x hasId=%d display=0x%x hasDisplay=%d mask=0x%x hasMask=%d valid=%llu hasValid=%d frozen=%llu hasFrozen=%d",
+                 scope, windowIndex, (unsigned) contextId,
+                 (unsigned) observedId, hasObservedId ? 1 : 0,
+                 (unsigned) observedDisplay, hasObservedDisplay ? 1 : 0,
+                 (unsigned) observedMask, hasObservedMask ? 1 : 0,
+                 valid, hasValid ? 1 : 0, frozen, hasFrozen ? 1 : 0);
+            line("hierarchy=contextfields scope=%s/%u layer=%d class=%.28s renderContext=%d class=%.28s options=%d class=%.24s",
+                 scope, windowIndex, contextLayer ? 1 : 0,
+                 class_name_or_nil(contextLayer), renderContext ? 1 : 0,
+                 class_name_or_nil(renderContext), options ? 1 : 0,
+                 class_name_or_nil(options));
+            snapshot_layer_tree("context", windowIndex, 0, contextLayer, 0,
+                                &gLayerBudget);
+        }
     }
     for (unsigned long long index = 0; index < count && index < 8; ++index) {
         snapshot_layer_tree(scope, windowIndex, viewIndex,
@@ -415,6 +457,7 @@ static void snapshot(const char *phase, unsigned sample)
     if (sample == 5) {
         gViewBudget = 96;
         gLayerBudget = 160;
+        gHostContextCount = 0;
     }
     probe_nonblocking_shared_instances();
     line("sample=%u phase=%s pid=%d workspaceClass=%d sceneClass=%d",
@@ -509,7 +552,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
     if (!process || strncmp(process, "SpringBoard", 11)) return;
-    line("observer load process=%s pid=%d build=H496", process, getpid());
+    line("observer load process=%s pid=%d build=H497", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0, 480.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),

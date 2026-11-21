@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H507 read-only SpringBoard scene observer. It is injected through the
+// H508 SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -48,6 +48,7 @@ static unsigned gWindowContentsEventCount;
 static unsigned gLayerCommitEventCount;
 static unsigned gWindowCommitCount[2];
 static unsigned gWindowVisibilityEventCount;
+static bool gRootActivationRequested;
 
 extern "C" {
 int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
@@ -615,6 +616,68 @@ static void trace_window_scene_visible(id self, SEL selector, id window)
     log_window_visibility("uiwindow_scene_visible", window, YES);
 }
 
+static void log_root_window_state(const char *phase)
+{
+    Class applicationClass = NSClassFromString(@"UIApplication");
+    id application = applicationClass
+        ? ((id (*)(id, SEL)) objc_msgSend)(
+              (id) applicationClass, @selector(sharedApplication))
+        : nil;
+    id windows = normalized_collection(read_object(application, "windows"));
+    const unsigned long long count = collection_count(windows);
+    line("event=root_activation_state phase=%s pid=%d windows=%llu requested=%d",
+         phase, getpid(), count, gRootActivationRequested ? 1 : 0);
+    for (unsigned long long index = 0; index < count && index < 8; ++index) {
+        id window = collection_object_at(windows, index);
+        const char *name = class_name_or_nil(window);
+        if (!strstr(name, "RootSceneWindow") &&
+            !strstr(name, "StatusBarWindow")) continue;
+        unsigned long long hidden = 0;
+        unsigned long long visible = 0;
+        const bool hasHidden = read_integer(window, "isHidden", &hidden);
+        const bool hasVisible = read_integer(window, "_isVisible", &visible);
+        id layer = read_object(window, "layer");
+        id windowScene = read_object(window, "windowScene");
+        unsigned long long activation = 0;
+        const bool hasActivation = read_integer(
+            windowScene, "activationState", &activation);
+        line("event=root_activation_window phase=%s window=%s object=%p hidden=%llu hasHidden=%d _isVisible=%llu hasVisible=%d layer=%.24s scene=%.24s activation=%llu hasActivation=%d",
+             phase, name, (__bridge void *) window, hidden, hasHidden ? 1 : 0,
+             visible, hasVisible ? 1 : 0, class_name_or_nil(layer),
+             class_name_or_nil(windowScene), activation,
+             hasActivation ? 1 : 0);
+    }
+}
+
+static void activate_root_scene_window(void)
+{
+    Class applicationClass = NSClassFromString(@"UIApplication");
+    id application = applicationClass
+        ? ((id (*)(id, SEL)) objc_msgSend)(
+              (id) applicationClass, @selector(sharedApplication))
+        : nil;
+    id windows = normalized_collection(read_object(application, "windows"));
+    const unsigned long long count = collection_count(windows);
+    log_root_window_state("before");
+    for (unsigned long long index = 0; index < count && index < 8; ++index) {
+        id window = collection_object_at(windows, index);
+        const char *name = class_name_or_nil(window);
+        if (!strstr(name, "RootSceneWindow")) continue;
+        line("event=root_activation_request pid=%d window=%p class=%s",
+             getpid(), (__bridge void *) window, name);
+        if ([window respondsToSelector:@selector(makeKeyAndVisible)])
+            ((void (*)(id, SEL)) objc_msgSend)(window,
+                                               @selector(makeKeyAndVisible));
+        break;
+    }
+    log_root_window_state("after");
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC),
+        dispatch_get_main_queue(), ^{
+            log_root_window_state("post10");
+        });
+}
+
 static bool install_instance_hook(Class cls, const char *name,
                                   IMP replacement, IMP *original)
 {
@@ -907,6 +970,12 @@ static void snapshot(const char *phase, unsigned sample)
     line("sample=%u appState=%llu hasAppState=%d",
          sample, applicationState, hasApplicationState ? 1 : 0);
     snapshot_windows("application", application, sample);
+    if (sample == 4 && !gRootActivationRequested) {
+        gRootActivationRequested = true;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            activate_root_scene_window();
+        });
+    }
 }
 
 static void *sampling_worker(void *)
@@ -928,7 +997,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
-    line("observer load process=%s pid=%d build=H507", process, getpid());
+    line("observer load process=%s pid=%d build=H508", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),

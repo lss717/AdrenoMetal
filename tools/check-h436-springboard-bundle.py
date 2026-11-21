@@ -37,7 +37,7 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H499",
+        "build=H501",
         "if (sample == 0) inventory_springboard_classes();",
         "probe_nonblocking_shared_instances();",
         'snapshot_windows("scene", delegate, sample);',
@@ -57,12 +57,11 @@ def main():
         'read_object(context, "renderContext")',
         "depth > 12",
         "cycle=1",
-        "probe_context_server((uint32_t) contextId",
-        "contextIdHostingContextId:",
-        "clientPortOfContextId:",
-        "taskNamePortOfContextId:",
-        "pid_for_task(",
-        'call_checked_class_selector("CAContext", "allContexts")',
+        "snapshot_dictionary(\"contextoptions\", options);",
+        '"inheritsSecurity"',
+        '"preservesFlip"',
+        '"applicationState"',
+        '"activationState"',
         '"sharedInstanceIfExists"',
         "class_copyMethodList(object_getClass(cls), &methodCount)",
         'line("sbinventory begin")',
@@ -78,6 +77,7 @@ def main():
         "createScene",
         "setScene",
         "class_addMethod",
+        "probe_context_server(",
     ):
         require(forbidden not in observer,
                 f"H436 observer is not read-only: {forbidden}")
@@ -106,7 +106,7 @@ def main():
     ):
         require(forbidden not in bootstrap,
                 f"H483 wrapper retained one-shot behavior: {forbidden}")
-    print("H500 SpringBoard observer gate: PASS")
+    print("H501 SpringBoard observer gate: PASS")
 
 
 if __name__ == "__main__":

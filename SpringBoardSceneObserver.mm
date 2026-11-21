@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H499 read-only SpringBoard scene observer. It is injected through the
+// H501 read-only SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -156,6 +156,30 @@ static void copy_utf8(id value, char *out, size_t size)
     snprintf(out, size, "%s", text ? text : "-");
 }
 
+static void copy_description(id value, char *out, size_t size)
+{
+    if (!out || !size) return;
+    out[0] = 0;
+    if (!value) {
+        snprintf(out, size, "nil");
+        return;
+    }
+    if ([value isKindOfClass:[NSString class]]) {
+        copy_utf8(value, out, size);
+        return;
+    }
+    if ([value respondsToSelector:@selector(description)]) {
+        @try {
+            id description = ((id (*)(id, SEL)) objc_msgSend)(
+                value, @selector(description));
+            copy_utf8(description, out, size);
+            return;
+        } @catch (id ignored) {
+        }
+    }
+    snprintf(out, size, "<%s>", object_getClassName(value));
+}
+
 static const char *class_name_or_nil(id object)
 {
     return object ? object_getClassName(object) : "nil";
@@ -296,86 +320,25 @@ static bool first_host_context(uint32_t contextId)
     return true;
 }
 
-static bool call_u32_arg(id object, const char *name, uint32_t argument,
-                         uint32_t *value)
+static void snapshot_dictionary(const char *scope, id dictionary)
 {
-    if (!object || !name || !value) return false;
-    const char *encoding = instance_encoding(object, name);
-    if (!encoding || encoding[0] != 'I') return false;
-    @try {
-        *value = ((uint32_t (*)(id, SEL, uint32_t)) objc_msgSend)(
-            object, sel_getUid(name), argument);
-        return true;
-    } @catch (id ignored) {
-        return false;
-    }
-}
-
-static void probe_context_process(const char *label, id server, uint32_t id)
-{
-    if (!id) {
-        line("hierarchy=contextmap id=%s value=0", label);
+    if (!dictionary || ![dictionary isKindOfClass:[NSDictionary class]]) {
+        line("hierarchy=dictionary scope=%s present=0", scope);
         return;
     }
-    uint32_t hosting = 0;
-    uint32_t client = 0;
-    uint32_t taskName = 0;
-    const bool hasHosting = call_u32_arg(
-        server, "contextIdHostingContextId:", id, &hosting);
-    const bool hasClient = call_u32_arg(
-        server, "clientPortOfContextId:", id, &client);
-    const bool hasTaskName = call_u32_arg(
-        server, "taskNamePortOfContextId:", id, &taskName);
-    int pid = 0;
-    kern_return_t pidStatus = KERN_FAILURE;
-    char process[32];
-    process[0] = 0;
-    if (hasTaskName && taskName) {
-        pidStatus = pid_for_task((mach_port_name_t) taskName, &pid);
-        if (pidStatus == KERN_SUCCESS)
-            proc_name(pid, process, sizeof process);
-        mach_port_deallocate(mach_task_self(), (mach_port_name_t) taskName);
-    }
-    line("hierarchy=contextmap id=%s value=0x%x hosting=0x%x hasHosting=%d client=0x%x hasClient=%d task=0x%x hasTask=%d pid=%d pidStatus=0x%x comm=%s",
-         label, id, hosting, hasHosting ? 1 : 0, client, hasClient ? 1 : 0,
-         taskName, hasTaskName ? 1 : 0, pid, pidStatus,
-         process[0] ? process : "-");
-}
-
-static void probe_context_server(uint32_t hostId, uint32_t contextId)
-{
-    id running = call_checked_class_selector("CAWindowServer", "serverIfRunning");
-    id server = running;
-    const char *mode = "running";
-    if (!server) {
-        server = call_checked_class_selector("CAWindowServer", "server");
-        mode = server ? "server" : "nil";
-    }
-    line("hierarchy=contextserver mode=%s running=%d server=%d host=0x%x context=0x%x",
-         mode, running ? 1 : 0, server ? 1 : 0, hostId, contextId);
-
-    id contexts = call_checked_class_selector("CAContext", "allContexts");
-    unsigned long long count = collection_count(contexts);
-    line("hierarchy=contextlist count=%llu hostMatch=0 contextMatch=0",
-         count);
-    bool hostMatch = false;
-    bool contextMatch = false;
+    NSArray *allKeys = ((NSDictionary *) dictionary).allKeys;
+    line("hierarchy=dictionary scope=%s count=%llu", scope,
+         collection_count(allKeys));
+    unsigned long long count = collection_count(allKeys);
     for (unsigned long long index = 0; index < count && index < 8; ++index) {
-        id context = collection_object_at(contexts, index);
-        unsigned long long id = 0;
-        const bool hasId = read_integer(context, "contextId", &id);
-        hostMatch = hostMatch || (hasId && id == hostId);
-        contextMatch = contextMatch || (hasId && id == contextId);
-        line("hierarchy=contextlist item=%llu id=0x%x hasId=%d class=%s",
-             index, (unsigned) id, hasId ? 1 : 0, class_name_or_nil(context));
+        id key = collection_object_at(allKeys, index);
+        id value = key ? [dictionary objectForKey:key] : nil;
+        char keyText[48], valueText[72];
+        copy_description(key, keyText, sizeof keyText);
+        copy_description(value, valueText, sizeof valueText);
+        line("hierarchy=dictionary scope=%s item=%llu key=%.44s value=%.68s",
+             scope, index, keyText, valueText);
     }
-    line("hierarchy=contextlist-matches host=%d context=%d",
-         hostMatch ? 1 : 0, contextMatch ? 1 : 0);
-
-    if (!server) return;
-    probe_context_process("host", server, hostId);
-    if (contextId != hostId)
-        probe_context_process("context", server, contextId);
 }
 
 static void snapshot_layer_tree(const char *scope, unsigned windowIndex,
@@ -409,6 +372,16 @@ static void snapshot_layer_tree(const char *scope, unsigned windowIndex,
              scope, windowIndex, viewIndex, depth, layerClass,
              (unsigned) contextId, hasContextId ? 1 : 0,
              context ? 1 : 0, class_name_or_nil(context));
+        unsigned long long inheritsSecurity = 0;
+        unsigned long long preservesFlip = 0;
+        const bool hasInheritsSecurity = read_integer(
+            layer, "inheritsSecurity", &inheritsSecurity);
+        const bool hasPreservesFlip = read_integer(
+            layer, "preservesFlip", &preservesFlip);
+        line("hierarchy=hostprops scope=%s/%u inheritsSecurity=%llu hasInherits=%d preservesFlip=%llu hasPreservesFlip=%d",
+             scope, windowIndex, inheritsSecurity,
+             hasInheritsSecurity ? 1 : 0, preservesFlip,
+             hasPreservesFlip ? 1 : 0);
         if (context && first_host_context((uint32_t) contextId)) {
             unsigned long long observedId = 0;
             unsigned long long observedDisplay = 0;
@@ -434,7 +407,7 @@ static void snapshot_layer_tree(const char *scope, unsigned windowIndex,
                  class_name_or_nil(contextLayer), renderContext ? 1 : 0,
                  class_name_or_nil(renderContext), options ? 1 : 0,
                  class_name_or_nil(options));
-            probe_context_server((uint32_t) contextId, (uint32_t) observedId);
+            snapshot_dictionary("contextoptions", options);
             snapshot_layer_tree("context", windowIndex, 0, contextLayer, 0,
                                 &gLayerBudget);
         }
@@ -514,6 +487,17 @@ static void snapshot_window(const char *scope, unsigned index, id window,
          scope, index, layer ? 1 : 0, class_name_or_nil(layer),
          rootViewController ? 1 : 0, class_name_or_nil(rootViewController),
          windowScene ? 1 : 0);
+    if (windowScene) {
+        unsigned long long activation = 0;
+        unsigned long long orientation = 0;
+        const bool hasActivation = read_integer(
+            windowScene, "activationState", &activation);
+        const bool hasOrientation = read_integer(
+            windowScene, "interfaceOrientation", &orientation);
+        line("window=%s/%u sceneClass=%s activationState=%llu hasActivation=%d interfaceOrientation=%llu hasOrientation=%d",
+             scope, index, class_name_or_nil(windowScene), activation,
+             hasActivation ? 1 : 0, orientation, hasOrientation ? 1 : 0);
+    }
     if (layer) log_object_field("window", index, layer, "contents");
     if (sample == 5)
         snapshot_window_views(scope, index, window, rootViewController);
@@ -601,6 +585,22 @@ static void snapshot(const char *phase, unsigned sample)
         };
         for (unsigned f = 0; f < sizeof fields / sizeof fields[0]; ++f)
             log_object_field("scene", (unsigned) i, scene, fields[f]);
+        id settings = read_object(scene, "settings");
+        if (settings) {
+            unsigned long long foreground = 0;
+            unsigned long long orientation = 0;
+            unsigned long long deactivation = 0;
+            const bool hasForeground = read_integer(
+                settings, "isForeground", &foreground);
+            const bool hasOrientation = read_integer(
+                settings, "interfaceOrientation", &orientation);
+            const bool hasDeactivation = read_integer(
+                settings, "deactivationReasons", &deactivation);
+            line("scene=%u settings class=%s foreground=%llu hasForeground=%d orientation=%llu hasOrientation=%d deactivation=0x%llx hasDeactivation=%d",
+                 (unsigned) i, class_name_or_nil(settings), foreground,
+                 hasForeground ? 1 : 0, orientation, hasOrientation ? 1 : 0,
+                 deactivation, hasDeactivation ? 1 : 0);
+        }
         id delegate = read_object(scene, "delegate");
         if (delegate) {
             line("scene=%u delegateClass=%s", (unsigned) i,
@@ -639,6 +639,11 @@ static void snapshot(const char *phase, unsigned sample)
         ? ((unsigned long long (*)(id, SEL)) objc_msgSend)(windows, @selector(count)) : 0;
     line("sample=%u app=%d delegate=%s scenes=%llu windows=%llu",
          sample, application ? 1 : 0, class_name_or_nil(delegate), connectedCount, windowCount);
+    unsigned long long applicationState = 0;
+    const bool hasApplicationState = read_integer(
+        application, "applicationState", &applicationState);
+    line("sample=%u appState=%llu hasAppState=%d",
+         sample, applicationState, hasApplicationState ? 1 : 0);
     snapshot_windows("application", application, sample);
 }
 
@@ -646,7 +651,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
     if (!process || strncmp(process, "SpringBoard", 11)) return;
-    line("observer load process=%s pid=%d build=H499", process, getpid());
+    line("observer load process=%s pid=%d build=H501", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0, 480.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),

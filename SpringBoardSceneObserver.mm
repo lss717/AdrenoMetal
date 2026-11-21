@@ -364,8 +364,8 @@ static void probe_context_server(uint32_t hostId, uint32_t contextId)
         id context = collection_object_at(contexts, index);
         unsigned long long id = 0;
         const bool hasId = read_integer(context, "contextId", &id);
-        hostMatch = hostMatch || hasId && id == hostId;
-        contextMatch = contextMatch || hasId && id == contextId;
+        hostMatch = hostMatch || (hasId && id == hostId);
+        contextMatch = contextMatch || (hasId && id == contextId);
         line("hierarchy=contextlist item=%llu id=0x%x hasId=%d class=%s",
              index, (unsigned) id, hasId ? 1 : 0, class_name_or_nil(context));
     }

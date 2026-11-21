@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H505 read-only SpringBoard scene observer. It is injected through the
+// H506 read-only SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -13,14 +13,15 @@
 #include <mach/mach.h>
 #include <sys/proc.h>
 #include <dlfcn.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <chrono>
-#include <thread>
+#include <time.h>
 #include <unistd.h>
 
 #include "NativeAdrenoABI.h"
@@ -651,11 +652,22 @@ static void snapshot(const char *phase, unsigned sample)
     snapshot_windows("application", application, sample);
 }
 
+static void *sampling_worker(void *)
+{
+    line("sample=5 scheduler=pthread entered");
+    struct timespec delay = { .tv_sec = 480, .tv_nsec = 0 };
+    while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {
+    }
+    line("sample=5 scheduler=pthread awake");
+    snapshot("springboard", 5);
+    return nullptr;
+}
+
 __attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
     if (!process || strncmp(process, "SpringBoard", 11)) return;
-    line("observer load process=%s pid=%d build=H505", process, getpid());
+    line("observer load process=%s pid=%d build=H506", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),
@@ -663,8 +675,8 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
             snapshot("springboard", index);
         });
     }
-    std::thread([] {
-        std::this_thread::sleep_for(std::chrono::seconds(480));
-        snapshot("springboard", 5);
-    }).detach();
+    pthread_t worker;
+    int result = pthread_create(&worker, nullptr, sampling_worker, nullptr);
+    line("sample=5 scheduler=pthread_create rc=%d", result);
+    if (result == 0) pthread_detach(worker);
 }

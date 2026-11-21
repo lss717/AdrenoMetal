@@ -37,7 +37,7 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H505",
+        "build=H506",
         "if (sample == 0) {",
         "inventory_springboard_classes();",
         "probe_nonblocking_shared_instances();",
@@ -63,7 +63,9 @@ def main():
         '"preservesFlip"',
         '"applicationState"',
         '"activationState"',
-        "std::this_thread::sleep_for(std::chrono::seconds(480));",
+        "pthread_create(&worker, nullptr, sampling_worker, nullptr)",
+        'line("sample=5 scheduler=pthread entered");',
+        'line("sample=5 scheduler=pthread awake");',
         'snapshot("springboard", 5);',
         '"sharedInstanceIfExists"',
         "class_copyMethodList(object_getClass(cls), &methodCount)",
@@ -109,7 +111,7 @@ def main():
     ):
         require(forbidden not in bootstrap,
                 f"H483 wrapper retained one-shot behavior: {forbidden}")
-    print("H505 SpringBoard observer gate: PASS")
+    print("H506 SpringBoard observer gate: PASS")
 
 
 if __name__ == "__main__":

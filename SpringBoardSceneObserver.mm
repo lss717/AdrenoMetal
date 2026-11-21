@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H495 read-only SpringBoard scene observer. It is injected through the
+// H496 read-only SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -287,12 +287,22 @@ static void snapshot_layer_tree(const char *scope, unsigned windowIndex,
 {
     if (!layer || depth > 6 || !budget || *budget == 0) return;
     --*budget;
+    const char *layerClass = object_getClassName(layer);
     id contents = read_object(layer, "contents");
     id sublayers = normalized_collection(read_object(layer, "sublayers"));
     unsigned long long count = collection_count(sublayers);
-    line("hierarchy=layer scope=%s/%u view=%u depth=%u class=%s contents=%d class=%s sublayers=%llu",
-         scope, windowIndex, viewIndex, depth, class_name_or_nil(layer),
-         contents ? 1 : 0, class_name_or_nil(contents), count);
+    line("hierarchy=layer scope=%s/%u view=%u depth=%u class=%s contents=%d sublayers=%llu",
+         scope, windowIndex, viewIndex, depth, layerClass,
+         contents ? 1 : 0, count);
+    if (strstr(layerClass, "LayerHost")) {
+        unsigned long long contextId = 0;
+        const bool hasContextId = read_integer(layer, "contextId", &contextId);
+        id context = read_object(layer, "context");
+        line("hierarchy=host scope=%s/%u view=%u depth=%u class=%.32s contextId=0x%x hasContextId=%d context=%d class=%.24s",
+             scope, windowIndex, viewIndex, depth, layerClass,
+             (unsigned) contextId, hasContextId ? 1 : 0,
+             context ? 1 : 0, class_name_or_nil(context));
+    }
     for (unsigned long long index = 0; index < count && index < 8; ++index) {
         snapshot_layer_tree(scope, windowIndex, viewIndex,
                             collection_object_at(sublayers, index),
@@ -499,7 +509,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
     if (!process || strncmp(process, "SpringBoard", 11)) return;
-    line("observer load process=%s pid=%d build=H495", process, getpid());
+    line("observer load process=%s pid=%d build=H496", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0, 480.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),

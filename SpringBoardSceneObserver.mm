@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H494 read-only SpringBoard scene observer. It is injected through the
+// H495 read-only SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -33,6 +33,8 @@ static io_connect_t gConnection;
 static uint32_t gSelector;
 static unsigned gBudget = 1024;
 static int gConsole = -2;
+static unsigned gViewBudget;
+static unsigned gLayerBudget;
 
 extern "C" {
 int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
@@ -255,6 +257,23 @@ static id normalized_collection(id collection)
     return collection;
 }
 
+static unsigned long long collection_count(id collection)
+{
+    collection = normalized_collection(collection);
+    if (!collection || ![collection respondsToSelector:@selector(count)]) return 0;
+    return ((unsigned long long (*)(id, SEL)) objc_msgSend)(
+        collection, @selector(count));
+}
+
+static id collection_object_at(id collection, unsigned long long index)
+{
+    collection = normalized_collection(collection);
+    if (!collection || ![collection respondsToSelector:@selector(objectAtIndex:)])
+        return nil;
+    return ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(
+        collection, @selector(objectAtIndex:), index);
+}
+
 static void log_object_field(const char *scope, unsigned index, id scene, const char *field)
 {
     id value = read_object(scene, field);
@@ -262,7 +281,79 @@ static void log_object_field(const char *scope, unsigned index, id scene, const 
          value ? 1 : 0, class_name_or_nil(value));
 }
 
-static void snapshot_window(const char *scope, unsigned index, id window)
+static void snapshot_layer_tree(const char *scope, unsigned windowIndex,
+                                unsigned viewIndex, id layer, unsigned depth,
+                                unsigned *budget)
+{
+    if (!layer || depth > 6 || !budget || *budget == 0) return;
+    --*budget;
+    id contents = read_object(layer, "contents");
+    id sublayers = normalized_collection(read_object(layer, "sublayers"));
+    unsigned long long count = collection_count(sublayers);
+    line("hierarchy=layer scope=%s/%u view=%u depth=%u class=%s contents=%d class=%s sublayers=%llu",
+         scope, windowIndex, viewIndex, depth, class_name_or_nil(layer),
+         contents ? 1 : 0, class_name_or_nil(contents), count);
+    for (unsigned long long index = 0; index < count && index < 8; ++index) {
+        snapshot_layer_tree(scope, windowIndex, viewIndex,
+                            collection_object_at(sublayers, index),
+                            depth + 1, budget);
+    }
+}
+
+static void snapshot_view_tree(const char *scope, unsigned windowIndex,
+                               unsigned *viewIndex, id view, unsigned depth,
+                               unsigned *viewBudget, unsigned *layerBudget)
+{
+    if (!view || depth > 6 || !viewBudget || *viewBudget == 0) return;
+    --*viewBudget;
+    const unsigned currentView = (*viewIndex)++;
+    unsigned long long hidden = 0;
+    const bool hasHidden = read_integer(view, "isHidden", &hidden);
+    id layer = read_object(view, "layer");
+    id subviews = normalized_collection(read_object(view, "subviews"));
+    unsigned long long count = collection_count(subviews);
+    line("hierarchy=view scope=%s/%u view=%u depth=%u class=%s hidden=%llu hasHidden=%d layer=%d class=%s subviews=%llu",
+         scope, windowIndex, currentView, depth, class_name_or_nil(view),
+         hidden, hasHidden, layer ? 1 : 0, class_name_or_nil(layer), count);
+    snapshot_layer_tree(scope, windowIndex, currentView, layer, depth, layerBudget);
+    for (unsigned long long index = 0; index < count && index < 8; ++index) {
+        snapshot_view_tree(scope, windowIndex, viewIndex,
+                           collection_object_at(subviews, index), depth + 1,
+                           viewBudget, layerBudget);
+    }
+}
+
+static void snapshot_window_views(const char *scope, unsigned windowIndex,
+                                  id window, id rootViewController)
+{
+    if (!gViewBudget || !gLayerBudget) return;
+
+    unsigned viewIndex = 0;
+    id rootView = read_object(rootViewController, "view");
+    id windowSubviews = normalized_collection(read_object(window, "subviews"));
+    unsigned long long subviewCount = collection_count(windowSubviews);
+    line("hierarchy=window scope=%s/%u rootVCView=%d class=%s subviews=%llu remainingView=%u remainingLayer=%u",
+         scope, windowIndex, rootView ? 1 : 0, class_name_or_nil(rootView),
+         subviewCount, gViewBudget, gLayerBudget);
+
+    if (rootView) {
+        snapshot_view_tree(scope, windowIndex, &viewIndex, rootView, 0,
+                           &gViewBudget, &gLayerBudget);
+    } else {
+        for (unsigned long long index = 0; index < subviewCount && index < 8; ++index) {
+            snapshot_view_tree(scope, windowIndex, &viewIndex,
+                               collection_object_at(windowSubviews, index), 0,
+                               &gViewBudget, &gLayerBudget);
+        }
+    }
+
+    id windowLayer = read_object(window, "layer");
+    snapshot_layer_tree(scope, windowIndex, viewIndex, windowLayer, 0,
+                        &gLayerBudget);
+}
+
+static void snapshot_window(const char *scope, unsigned index, id window,
+                            unsigned sample)
 {
     unsigned long long hidden = 0;
     unsigned long long level = 0;
@@ -278,9 +369,11 @@ static void snapshot_window(const char *scope, unsigned index, id window)
          rootViewController ? 1 : 0, class_name_or_nil(rootViewController),
          windowScene ? 1 : 0);
     if (layer) log_object_field("window", index, layer, "contents");
+    if (sample == 5)
+        snapshot_window_views(scope, index, window, rootViewController);
 }
 
-static void snapshot_windows(const char *scope, id owner)
+static void snapshot_windows(const char *scope, id owner, unsigned sample)
 {
     id windows = normalized_collection(read_object(owner, "windows"));
     if (!windows) windows = normalized_collection(read_object(owner, "_windows"));
@@ -296,7 +389,7 @@ static void snapshot_windows(const char *scope, id owner)
     for (unsigned long long index = 0; index < count && index < 8; ++index) {
         id window = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(
             windows, @selector(objectAtIndex:), index);
-        if (window) snapshot_window(scope, (unsigned) index, window);
+        if (window) snapshot_window(scope, (unsigned) index, window, sample);
     }
 }
 
@@ -309,6 +402,10 @@ static void snapshot(const char *phase, unsigned sample)
     Class workspaceClass = NSClassFromString(@"FBSWorkspace");
     Class sceneClass = NSClassFromString(@"FBScene");
     if (sample == 0) inventory_springboard_classes();
+    if (sample == 5) {
+        gViewBudget = 96;
+        gLayerBudget = 160;
+    }
     probe_nonblocking_shared_instances();
     line("sample=%u phase=%s pid=%d workspaceClass=%d sceneClass=%d",
          sample, phase, getpid(), workspaceClass ? 1 : 0, sceneClass ? 1 : 0);
@@ -361,7 +458,7 @@ static void snapshot(const char *phase, unsigned sample)
         if (delegate) {
             line("scene=%u delegateClass=%s", (unsigned) i,
                  class_name_or_nil(delegate));
-            snapshot_windows("scene", delegate);
+            snapshot_windows("scene", delegate, sample);
         }
     }
 
@@ -395,14 +492,14 @@ static void snapshot(const char *phase, unsigned sample)
         ? ((unsigned long long (*)(id, SEL)) objc_msgSend)(windows, @selector(count)) : 0;
     line("sample=%u app=%d delegate=%s scenes=%llu windows=%llu",
          sample, application ? 1 : 0, class_name_or_nil(delegate), connectedCount, windowCount);
-    snapshot_windows("application", application);
+    snapshot_windows("application", application, sample);
 }
 
 __attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
     if (!process || strncmp(process, "SpringBoard", 11)) return;
-    line("observer load process=%s pid=%d build=H494", process, getpid());
+    line("observer load process=%s pid=%d build=H495", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0, 480.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),

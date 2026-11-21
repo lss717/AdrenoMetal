@@ -20,8 +20,8 @@ def main():
     observer = OBSERVER.read_text(encoding="utf-8")
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
 
-    require('caller("builder", "build", "H512");' in trace,
-            "H512 trace marker missing")
+    require('caller("builder", "build", "H513");' in trace,
+            "H513 trace marker missing")
     for marker in (
         "state->owner_status = pid_for_task(",
         'proc_name(state->owner_pid, state->owner_name',
@@ -43,7 +43,7 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H512",
+        "build=H513",
         "if (sample == 0) {",
         "inventory_springboard_classes();",
         "probe_nonblocking_shared_instances();",
@@ -86,6 +86,15 @@ def main():
         '"uiwindow_scene_visible"',
         'event=root_visibility_state',
         'event=root_visibility_window',
+        'event=h513_constructor_enter',
+        'event=h513_constructor_skip',
+        'event=h513_constructor_accepted',
+        'event=h513_dispatch_scheduled',
+        'event=h513_dispatch_closure_enter',
+        'event=h513_dispatch_closure_exit',
+        'event=h513_snapshot_enter',
+        'event=h513_dlopen',
+        'event=h513_snapshot_exit',
         'event=h512_app_monitor_start',
         'event=h512_app_ready',
         'event=h512_app_wait',
@@ -143,7 +152,7 @@ def main():
     ):
         require(forbidden not in bootstrap,
                 f"H483 wrapper retained one-shot behavior: {forbidden}")
-    print("H512 SpringBoard observer gate: PASS")
+    print("H513 SpringBoard observer gate: PASS")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H512 SpringBoard scene observer. It is injected through the
+// H513 SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -917,9 +917,17 @@ static void snapshot_windows(const char *scope, id owner, unsigned sample)
 
 static void snapshot(const char *phase, unsigned sample)
 {
-    dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices",
-           RTLD_NOW);
-    dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
+    line("event=h513_snapshot_enter sample=%u phase=%s pid=%d pre_dlopen=1",
+         sample, phase, getpid());
+    void *frontBoard = dlopen(
+        "/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices",
+        RTLD_NOW);
+    line("event=h513_dlopen name=FrontBoardServices sample=%u ok=%d", sample,
+         frontBoard ? 1 : 0);
+    void *quartzCore = dlopen(
+        "/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
+    line("event=h513_dlopen name=QuartzCore sample=%u ok=%d", sample,
+         quartzCore ? 1 : 0);
 
     Class workspaceClass = NSClassFromString(@"FBSWorkspace");
     Class sceneClass = NSClassFromString(@"FBScene");
@@ -1045,6 +1053,8 @@ static void snapshot(const char *phase, unsigned sample)
             wait_for_application_ready_then_request_visibility();
         });
     }
+    line("event=h513_snapshot_exit sample=%u phase=%s pid=%d",
+         sample, phase, getpid());
 }
 
 static void *sampling_worker(void *)
@@ -1061,17 +1071,31 @@ static void *sampling_worker(void *)
 __attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
-    if (!process || strncmp(process, "SpringBoard", 11)) return;
+    line("event=h513_constructor_enter process=%s pid=%d",
+         process ? process : "?", getpid());
+    if (!process || strncmp(process, "SpringBoard", 11)) {
+        line("event=h513_constructor_skip process=%s pid=%d reason=process-filter",
+             process ? process : "?", getpid());
+        return;
+    }
+    line("event=h513_constructor_accepted process=%s pid=%d",
+         process, getpid());
     dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices",
            RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
-    line("observer load process=%s pid=%d build=H512", process, getpid());
+    line("observer load process=%s pid=%d build=H513", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
+        line("event=h513_dispatch_scheduled sample=%u delay_seconds=%.0f pid=%d",
+             index, delays[index], getpid());
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),
                        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            line("event=h513_dispatch_closure_enter sample=%u pid=%d",
+                 index, getpid());
             snapshot("springboard", index);
+            line("event=h513_dispatch_closure_exit sample=%u pid=%d",
+                 index, getpid());
         });
     }
     pthread_t worker;

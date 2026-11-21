@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H506 read-only SpringBoard scene observer. It is injected through the
+// H507 read-only SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -47,6 +47,7 @@ static unsigned gTransactionEventCount;
 static unsigned gWindowContentsEventCount;
 static unsigned gLayerCommitEventCount;
 static unsigned gWindowCommitCount[2];
+static unsigned gWindowVisibilityEventCount;
 
 extern "C" {
 int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
@@ -477,9 +478,13 @@ static bool remember_context_event(uint32_t contextId)
 static IMP gLayerHostSetContextId;
 static IMP gLayerHostDidBecomeVisible;
 static IMP gContextSetLayer;
+static IMP gContextRemoteWithOptions;
 static IMP gLayerSetContents;
 static IMP gLayerDidCommit;
 static IMP gTransactionFlushAsRunLoopObserver;
+static IMP gWindowSetHidden;
+static IMP gWindowMakeKeyAndVisible;
+static IMP gWindowSceneDidBecomeVisible;
 
 static void trace_layer_host_context_id(id self, SEL selector, uint32_t contextId)
 {
@@ -520,6 +525,20 @@ static void trace_context_set_layer(id self, SEL selector, id layer)
     log_layer_event("ca_context_layer", window_kind_for_layer(layer), layer);
 }
 
+static id trace_context_remote_with_options(id self, SEL selector, id options)
+{
+    id context = ((id (*)(id, SEL, id)) gContextRemoteWithOptions)(
+        self, selector, options);
+    unsigned long long contextId = 0;
+    const bool hasContextId = read_integer(context, "contextId", &contextId);
+    id layer = read_object(context, "layer");
+    line("event=ca_context_remote_create pid=%d context=%p contextId=0x%x hasContextId=%d layer=%.24s options=%.24s",
+         getpid(), (__bridge void *) context, (unsigned) contextId,
+         hasContextId ? 1 : 0, class_name_or_nil(layer),
+         class_name_or_nil(options));
+    return context;
+}
+
 static void trace_layer_set_contents(id self, SEL selector, id contents)
 {
     ((void (*)(id, SEL, id)) gLayerSetContents)(self, selector, contents);
@@ -557,6 +576,45 @@ static void trace_transaction_flush(id self, SEL selector)
          gHostContextEventCount, gLayerCommitEventCount);
 }
 
+static void log_window_visibility(const char *event, id window, BOOL visible)
+{
+    if (gWindowVisibilityEventCount >= 16) return;
+    ++gWindowVisibilityEventCount;
+    unsigned long long hidden = 0;
+    unsigned long long windowVisible = 0;
+    const bool hasHidden = read_integer(window, "isHidden", &hidden);
+    const bool hasVisible = read_integer(window, "_isVisible", &windowVisible);
+    id layer = read_object(window, "layer");
+    id windowScene = read_object(window, "windowScene");
+    line("event=%s window=%s pid=%d object=%p visible=%d hidden=%llu hasHidden=%d _isVisible=%llu hasVisible=%d layer=%.24s scene=%.24s",
+         event, window_kind_for_layer(layer), getpid(), (__bridge void *) window,
+         visible ? 1 : 0, hidden, hasHidden ? 1 : 0, windowVisible,
+         hasVisible ? 1 : 0, class_name_or_nil(layer),
+         class_name_or_nil(windowScene));
+    if (layer) log_layer_event(event, window_kind_for_layer(layer), layer);
+}
+
+static void trace_window_set_hidden(id self, SEL selector,
+                                    BOOL hidden, BOOL forced)
+{
+    ((void (*)(id, SEL, BOOL, BOOL)) gWindowSetHidden)(
+        self, selector, hidden, forced);
+    log_window_visibility("uiwindow_set_hidden", self, !hidden);
+}
+
+static void trace_window_make_key_visible(id self, SEL selector)
+{
+    ((void (*)(id, SEL)) gWindowMakeKeyAndVisible)(self, selector);
+    log_window_visibility("uiwindow_make_key_visible", self, YES);
+}
+
+static void trace_window_scene_visible(id self, SEL selector, id window)
+{
+    ((void (*)(id, SEL, id)) gWindowSceneDidBecomeVisible)(
+        self, selector, window);
+    log_window_visibility("uiwindow_scene_visible", window, YES);
+}
+
 static bool install_instance_hook(Class cls, const char *name,
                                   IMP replacement, IMP *original)
 {
@@ -585,6 +643,8 @@ static void install_ca_event_hooks(void)
     Class context = NSClassFromString(@"CAContext");
     Class layer = NSClassFromString(@"CALayer");
     Class transaction = NSClassFromString(@"CATransaction");
+    Class window = NSClassFromString(@"UIWindow");
+    Class windowScene = NSClassFromString(@"UIWindowScene");
     const bool hostId = install_instance_hook(
         layerHost, "setContextId:", (IMP) trace_layer_host_context_id,
         &gLayerHostSetContextId);
@@ -593,6 +653,9 @@ static void install_ca_event_hooks(void)
         &gLayerHostDidBecomeVisible);
     const bool contextLayer = install_instance_hook(
         context, "setLayer:", (IMP) trace_context_set_layer, &gContextSetLayer);
+    const bool contextRemote = install_class_hook(
+        context, "remoteContextWithOptions:",
+        (IMP) trace_context_remote_with_options, &gContextRemoteWithOptions);
     const bool contents = install_instance_hook(
         layer, "setContents:", (IMP) trace_layer_set_contents, &gLayerSetContents);
     const bool commit = install_instance_hook(
@@ -600,9 +663,20 @@ static void install_ca_event_hooks(void)
     const bool flush = install_class_hook(
         transaction, "flushAsRunLoopObserver",
         (IMP) trace_transaction_flush, &gTransactionFlushAsRunLoopObserver);
-    line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contents=%d commit=%d flush=%d",
+    const bool windowHidden = install_instance_hook(
+        window, "_setHidden:forced:", (IMP) trace_window_set_hidden,
+        &gWindowSetHidden);
+    const bool windowMakeVisible = install_instance_hook(
+        window, "makeKeyAndVisible", (IMP) trace_window_make_key_visible,
+        &gWindowMakeKeyAndVisible);
+    const bool windowSceneVisible = install_instance_hook(
+        windowScene, "_delegate_windowDidBecomeVisible:",
+        (IMP) trace_window_scene_visible, &gWindowSceneDidBecomeVisible);
+    line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contextRemote=%d contents=%d commit=%d flush=%d windowHidden=%d windowMakeVisible=%d windowSceneVisible=%d",
          getpid(), hostId ? 1 : 0, hostVisible ? 1 : 0, contextLayer ? 1 : 0,
-         contents ? 1 : 0, commit ? 1 : 0, flush ? 1 : 0);
+         contextRemote ? 1 : 0, contents ? 1 : 0, commit ? 1 : 0,
+         flush ? 1 : 0, windowHidden ? 1 : 0, windowMakeVisible ? 1 : 0,
+         windowSceneVisible ? 1 : 0);
 }
 
 static void snapshot_view_tree(const char *scope, unsigned windowIndex,
@@ -685,7 +759,7 @@ static void snapshot_window(const char *scope, unsigned index, id window,
              hasActivation ? 1 : 0, orientation, hasOrientation ? 1 : 0);
     }
     if (layer) log_object_field("window", index, layer, "contents");
-    if (sample == 5)
+    if (sample == 4 || sample == 5)
         snapshot_window_views(scope, index, window, rootViewController);
 }
 
@@ -721,7 +795,7 @@ static void snapshot(const char *phase, unsigned sample)
         inventory_springboard_classes();
         probe_nonblocking_shared_instances();
     }
-    if (sample == 5) {
+    if (sample == 4 || sample == 5) {
         gViewBudget = 96;
         gLayerBudget = 240;
         gHostContextCount = 0;
@@ -854,7 +928,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
-    line("observer load process=%s pid=%d build=H506", process, getpid());
+    line("observer load process=%s pid=%d build=H507", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),

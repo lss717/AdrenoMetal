@@ -20,8 +20,8 @@ def main():
     observer = OBSERVER.read_text(encoding="utf-8")
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
 
-    require('caller("builder", "build", "H506");' in trace,
-            "H506 trace marker missing")
+    require('caller("builder", "build", "H507");' in trace,
+            "H507 trace marker missing")
     for marker in (
         "state->owner_status = pid_for_task(",
         'proc_name(state->owner_pid, state->owner_name',
@@ -43,7 +43,7 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H506",
+        "build=H507",
         "if (sample == 0) {",
         "inventory_springboard_classes();",
         "probe_nonblocking_shared_instances();",
@@ -76,10 +76,15 @@ def main():
         'install_ca_event_hooks();',
         'event=ca_host_context_bind',
         'event=ca_host_visible',
+        'event=ca_context_remote_create',
         'event=ca_context_set_layer',
         'event=ca_layer_set_contents',
         '"ca_layer_commit"',
         'event=ca_transaction_flush',
+        '"uiwindow_set_hidden"',
+        '"uiwindow_make_key_visible"',
+        '"uiwindow_scene_visible"',
+        'if (sample == 4 || sample == 5)',
         '"sharedInstanceIfExists"',
         "class_copyMethodList(object_getClass(cls), &methodCount)",
         'line("sbinventory begin")',
@@ -124,7 +129,7 @@ def main():
     ):
         require(forbidden not in bootstrap,
                 f"H483 wrapper retained one-shot behavior: {forbidden}")
-    print("H506 SpringBoard observer gate: PASS")
+    print("H507 SpringBoard observer gate: PASS")
 
 
 if __name__ == "__main__":

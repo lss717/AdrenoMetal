@@ -527,11 +527,22 @@ static void trace_server_layer_commit(id self, SEL selector, id layer)
     id context = observer_object(self, "context");
     const uint32_t contextId = observer_u32(context, "contextId", UINT32_MAX);
     id contents = observer_object(self, "contents");
+    id root = self;
+    unsigned depth = 0;
+    while (depth < 16) {
+        id superlayer = observer_object(root, "superlayer");
+        if (!superlayer) break;
+        root = superlayer;
+        ++depth;
+    }
+    id rootContents = observer_object(root, "contents");
     char detail[220];
     snprintf(detail, sizeof detail,
-             "layer=%p class=%s ctx=0x%x contents=%s owner=%d/%s",
-             (__bridge void *) self, object_getClassName(self), contextId,
+             "layer=%p class=%s depth=%u root=%p ctx=0x%x contents=%s rootContents=%s owner=%d/%s",
+             (__bridge void *) self, object_getClassName(self), depth,
+             (__bridge void *) root, contextId,
              contents ? object_getClassName(contents) : "-",
+             rootContents ? object_getClassName(rootContents) : "-",
              getpid(), getprogname() ? getprogname() : "?");
     caller("srv", "event_layer_commit", detail);
 }
@@ -1937,7 +1948,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H506");
+    caller("builder", "build", "H507");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

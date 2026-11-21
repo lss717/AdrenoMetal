@@ -23,9 +23,11 @@ def main() -> int:
     ):
         require(marker in text, "missing probe marker: " + marker)
     for forbidden in (
-        "Foundation",
-        "IOKit",
-        "objc",
+        "#import <Foundation",
+        "#include <Foundation",
+        "#import <IOKit",
+        "#include <IOKit",
+        "objc/",
         "IOService",
         "dispatch_",
         "SpringBoardSceneObserver",

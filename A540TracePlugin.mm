@@ -352,6 +352,9 @@ struct observer_context_state {
     unsigned root_sublayers;
     unsigned tree_nodes;
     unsigned contents_nodes;
+    int owner_pid;
+    kern_return_t owner_status;
+    char owner_name[32];
 };
 
 static struct observer_context_state observed_contexts[8];
@@ -407,6 +410,16 @@ observe_context_state(const char *why, id server, uint32_t id,
                 observer_u32_arg(server, "clientPortOfContextId:", id, 0);
             state->task_name_port =
                 observer_u32_arg(server, "taskNamePortOfContextId:", id, 0);
+            if (state->task_name_port) {
+                state->owner_status = pid_for_task(
+                    (mach_port_name_t) state->task_name_port,
+                    &state->owner_pid);
+                if (state->owner_status == KERN_SUCCESS)
+                    proc_name(state->owner_pid, state->owner_name,
+                              (uint32_t) sizeof state->owner_name);
+                mach_port_deallocate(
+                    mach_task_self(), (mach_port_name_t) state->task_name_port);
+            }
         }
     }
     state->display_id = display_id;
@@ -418,9 +431,11 @@ observe_context_state(const char *why, id server, uint32_t id,
 
     char detail[220];
     snprintf(detail, sizeof detail,
-             "%s state=%s ctx=0x%x display=0x%x mask=0x%x host=0x%x client=0x%x task=0x%x root=0x%llx subs=%u nodes=%u contents=%u",
+             "%s state=%s ctx=0x%x display=0x%x mask=0x%x host=0x%x client=0x%x task=0x%x owner=%d/0x%x/%.20s root=0x%llx subs=%u nodes=%u contents=%u",
              why, is_new ? "new" : "changed", id, display_id, display_mask,
              state->hosting_id, state->client_port, state->task_name_port,
+             state->owner_pid, state->owner_status,
+             state->owner_name[0] ? state->owner_name : "-",
              (unsigned long long) root, root_sublayers, tree_nodes,
              contents_nodes);
     caller("srv", "ctxchange", detail);
@@ -1782,7 +1797,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H436");
+    caller("builder", "build", "H500");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

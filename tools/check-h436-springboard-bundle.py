@@ -20,8 +20,14 @@ def main():
     observer = OBSERVER.read_text(encoding="utf-8")
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
 
-    require('caller("builder", "build", "H436");' in trace,
-            "H436 trace marker missing")
+    require('caller("builder", "build", "H500");' in trace,
+            "H500 trace marker missing")
+    for marker in (
+        "state->owner_status = pid_for_task(",
+        'proc_name(state->owner_pid, state->owner_name',
+        'owner=%d/0x%x/%.20s',
+    ):
+        require(marker in trace, f"H500 context owner marker missing: {marker}")
     for marker in (
         'strncmp(process, "SpringBoard", 11)',
         "FBSWorkspace",
@@ -100,7 +106,7 @@ def main():
     ):
         require(forbidden not in bootstrap,
                 f"H483 wrapper retained one-shot behavior: {forbidden}")
-    print("H499 SpringBoard observer gate: PASS")
+    print("H500 SpringBoard observer gate: PASS")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate H436's SpringBoard bundle wrapper and scene observer."""
+"""Validate the SpringBoard bundle wrapper and scene observer."""
 
 from pathlib import Path
 
@@ -46,14 +46,23 @@ def main():
 
     for marker in (
         "H436_SBWRAP",
+        "build=H481",
         'setenv("DYLD_INSERT_LIBRARIES"',
         '"/System/Library/CoreServices/SpringBoard.app/SpringBoard.real"',
         "execv(kSpringBoard, arguments)",
-        "--launch-springboard",
+        "return launch_springboard()",
         "DYLD_INSERT_LIBRARIES",
         "SpringBoardSceneObserver.dylib",
     ):
         require(marker in bootstrap, f"H436 wrapper missing: {marker}")
+    for forbidden in (
+        "bootstrap already claimed",
+        "terminate_springboard",
+        "find_process",
+        "posix_spawn",
+    ):
+        require(forbidden not in bootstrap,
+                f"H481 wrapper retained one-shot behavior: {forbidden}")
     print("H436 SpringBoard bundle wrapper gate: PASS")
 
 

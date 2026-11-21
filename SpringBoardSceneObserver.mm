@@ -641,6 +641,7 @@ static void trace_window_scene_visible(id self, SEL selector, id window)
     log_window_visibility("uiwindow_scene_visible", window, YES);
 }
 
+static void log_root_window_state(const char *phase) __attribute__((unused));
 static void log_root_window_state(const char *phase)
 {
     Class applicationClass = NSClassFromString(@"UIApplication");

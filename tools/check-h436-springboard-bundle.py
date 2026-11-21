@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TRACE = ROOT / "A540TracePlugin.mm"
 OBSERVER = ROOT / "SpringBoardSceneObserver.mm"
+LS_OBSERVER = ROOT / "SpringBoardLSWorkspaceObserverBypass.mm"
 BOOTSTRAP = ROOT / "SceneBootstrap.mm"
 
 
@@ -18,6 +19,7 @@ def require(condition, message):
 def main():
     trace = TRACE.read_text(encoding="utf-8")
     observer = OBSERVER.read_text(encoding="utf-8")
+    ls_observer = LS_OBSERVER.read_text(encoding="utf-8")
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
 
     require('caller("builder", "build", "H522");' in trace,
@@ -43,7 +45,7 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H522",
+        "build=H533",
         "if (sample == 0) {",
         "inventory_springboard_classes();",
         "probe_nonblocking_shared_instances();",
@@ -100,6 +102,16 @@ def main():
         '"SBWindowSceneManager"',
     ):
         require(marker in observer, f"H436 observer missing: {marker}")
+    for marker in (
+        "LSApplicationWorkspace",
+        "addObserver:",
+        "method_setImplementation(",
+        "observer bypass installed",
+        "observer bypass pid=",
+        "H533_LS",
+    ):
+        require(marker in ls_observer,
+                f"H533 LaunchServices observer bypass missing: {marker}")
     for forbidden in (
         "NSSetUncaughtExceptionHandler",
         "requestSceneCreation",
@@ -137,7 +149,7 @@ def main():
     ):
         require(forbidden not in bootstrap,
                 f"H483 wrapper retained one-shot behavior: {forbidden}")
-    print("H522 SpringBoard observer gate: PASS")
+    print("H533 SpringBoard observer gate: PASS")
 
 
 if __name__ == "__main__":

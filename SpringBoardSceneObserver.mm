@@ -260,11 +260,11 @@ static void snapshot(const char *phase, unsigned sample)
          sample, application ? 1 : 0, class_name_or_nil(delegate), connectedCount, windowCount);
 }
 
-__attribute__((constructor)) static void h432_observer_constructor(void)
+__attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
-    if (!process || strcmp(process, "SpringBoard")) return;
-    line("observer load process=%s pid=%d build=H436", process, getpid());
+    if (!process || strncmp(process, "SpringBoard", 11)) return;
+    line("observer load process=%s pid=%d build=H481", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0, 480.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),

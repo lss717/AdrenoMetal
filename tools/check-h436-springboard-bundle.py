@@ -23,7 +23,7 @@ def main():
     require('caller("builder", "build", "H436");' in trace,
             "H436 trace marker missing")
     for marker in (
-        'strcmp(process, "SpringBoard")',
+        'strncmp(process, "SpringBoard", 11)',
         "FBSWorkspace",
         "_sharedWorkspaceIfExists",
         'read_object(workspace, "scenes")',
@@ -31,7 +31,7 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H436",
+        "build=H481",
     ):
         require(marker in observer, f"H436 observer missing: {marker}")
     for forbidden in (

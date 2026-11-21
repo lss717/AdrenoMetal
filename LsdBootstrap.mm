@@ -49,7 +49,8 @@ int main(int argc, char **argv)
     line("env insert=%s", kShim);
     line("exec target=%s argv0=lsd", kLsd);
 
-    char **arguments = calloc((size_t) argc + 1, sizeof(*arguments));
+    char **arguments =
+        static_cast<char **>(calloc((size_t) argc + 1, sizeof(*arguments)));
     if (!arguments) {
         line("calloc failed");
         return 1;

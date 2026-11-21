@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H498 read-only SpringBoard scene observer. It is injected through the
+// H499 read-only SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -296,6 +296,88 @@ static bool first_host_context(uint32_t contextId)
     return true;
 }
 
+static bool call_u32_arg(id object, const char *name, uint32_t argument,
+                         uint32_t *value)
+{
+    if (!object || !name || !value) return false;
+    const char *encoding = instance_encoding(object, name);
+    if (!encoding || encoding[0] != 'I') return false;
+    @try {
+        *value = ((uint32_t (*)(id, SEL, uint32_t)) objc_msgSend)(
+            object, sel_getUid(name), argument);
+        return true;
+    } @catch (id ignored) {
+        return false;
+    }
+}
+
+static void probe_context_process(const char *label, id server, uint32_t id)
+{
+    if (!id) {
+        line("hierarchy=contextmap id=%s value=0", label);
+        return;
+    }
+    uint32_t hosting = 0;
+    uint32_t client = 0;
+    uint32_t taskName = 0;
+    const bool hasHosting = call_u32_arg(
+        server, "contextIdHostingContextId:", id, &hosting);
+    const bool hasClient = call_u32_arg(
+        server, "clientPortOfContextId:", id, &client);
+    const bool hasTaskName = call_u32_arg(
+        server, "taskNamePortOfContextId:", id, &taskName);
+    int pid = 0;
+    kern_return_t pidStatus = KERN_FAILURE;
+    char process[32];
+    process[0] = 0;
+    if (hasTaskName && taskName) {
+        pidStatus = pid_for_task((mach_port_name_t) taskName, &pid);
+        if (pidStatus == KERN_SUCCESS)
+            proc_name(pid, process, sizeof process);
+        mach_port_deallocate(mach_task_self(), (mach_port_name_t) taskName);
+    }
+    line("hierarchy=contextmap id=%s value=0x%x hosting=0x%x hasHosting=%d client=0x%x hasClient=%d task=0x%x hasTask=%d pid=%d pidStatus=0x%x comm=%s",
+         label, id, hosting, hasHosting ? 1 : 0, client, hasClient ? 1 : 0,
+         taskName, hasTaskName ? 1 : 0, pid, pidStatus,
+         process[0] ? process : "-");
+}
+
+static void probe_context_server(uint32_t hostId, uint32_t contextId)
+{
+    id running = call_checked_class_selector("CAWindowServer", "serverIfRunning");
+    id server = running;
+    const char *mode = "running";
+    if (!server) {
+        server = call_checked_class_selector("CAWindowServer", "server");
+        mode = server ? "server" : "nil";
+    }
+    line("hierarchy=contextserver mode=%s running=%d server=%d host=0x%x context=0x%x",
+         mode, running ? 1 : 0, server ? 1 : 0, hostId, contextId);
+
+    id contexts = call_checked_class_selector("CAContext", "allContexts");
+    unsigned long long count = collection_count(contexts);
+    line("hierarchy=contextlist count=%llu hostMatch=0 contextMatch=0",
+         count);
+    bool hostMatch = false;
+    bool contextMatch = false;
+    for (unsigned long long index = 0; index < count && index < 8; ++index) {
+        id context = collection_object_at(contexts, index);
+        unsigned long long id = 0;
+        const bool hasId = read_integer(context, "contextId", &id);
+        hostMatch = hostMatch || hasId && id == hostId;
+        contextMatch = contextMatch || hasId && id == contextId;
+        line("hierarchy=contextlist item=%llu id=0x%x hasId=%d class=%s",
+             index, (unsigned) id, hasId ? 1 : 0, class_name_or_nil(context));
+    }
+    line("hierarchy=contextlist-matches host=%d context=%d",
+         hostMatch ? 1 : 0, contextMatch ? 1 : 0);
+
+    if (!server) return;
+    probe_context_process("host", server, hostId);
+    if (contextId != hostId)
+        probe_context_process("context", server, contextId);
+}
+
 static void snapshot_layer_tree(const char *scope, unsigned windowIndex,
                                 unsigned viewIndex, id layer, unsigned depth,
                                 unsigned *budget)
@@ -352,6 +434,7 @@ static void snapshot_layer_tree(const char *scope, unsigned windowIndex,
                  class_name_or_nil(contextLayer), renderContext ? 1 : 0,
                  class_name_or_nil(renderContext), options ? 1 : 0,
                  class_name_or_nil(options));
+            probe_context_server((uint32_t) contextId, (uint32_t) observedId);
             snapshot_layer_tree("context", windowIndex, 0, contextLayer, 0,
                                 &gLayerBudget);
         }
@@ -563,7 +646,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
     if (!process || strncmp(process, "SpringBoard", 11)) return;
-    line("observer load process=%s pid=%d build=H498", process, getpid());
+    line("observer load process=%s pid=%d build=H499", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0, 480.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),

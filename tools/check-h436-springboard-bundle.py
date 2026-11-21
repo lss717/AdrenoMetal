@@ -31,7 +31,7 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H498",
+        "build=H499",
         "if (sample == 0) inventory_springboard_classes();",
         "probe_nonblocking_shared_instances();",
         'snapshot_windows("scene", delegate, sample);',
@@ -51,6 +51,12 @@ def main():
         'read_object(context, "renderContext")',
         "depth > 12",
         "cycle=1",
+        "probe_context_server((uint32_t) contextId",
+        "contextIdHostingContextId:",
+        "clientPortOfContextId:",
+        "taskNamePortOfContextId:",
+        "pid_for_task(",
+        'call_checked_class_selector("CAContext", "allContexts")',
         '"sharedInstanceIfExists"',
         "class_copyMethodList(object_getClass(cls), &methodCount)",
         'line("sbinventory begin")',
@@ -94,7 +100,7 @@ def main():
     ):
         require(forbidden not in bootstrap,
                 f"H483 wrapper retained one-shot behavior: {forbidden}")
-    print("H498 SpringBoard observer gate: PASS")
+    print("H499 SpringBoard observer gate: PASS")
 
 
 if __name__ == "__main__":

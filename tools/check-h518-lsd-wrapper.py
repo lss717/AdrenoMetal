@@ -53,7 +53,7 @@ def main() -> int:
     ):
         require(forbidden not in shim,
                 "recovery shim exceeds its single operation: " + forbidden)
-    print("H520 lsd wrapper and recovery-async gate: PASS")
+    print("H521 lsd wrapper and recovery-async gate: PASS")
     return 0
 
 

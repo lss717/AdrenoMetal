@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H510 SpringBoard scene observer. It is injected through the
+// H511 SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -666,19 +666,41 @@ static void request_root_window_visible(void)
         : nil;
     id windows = normalized_collection(read_object(application, "windows"));
     const unsigned long long count = collection_count(windows);
-    log_root_window_state("h510_before");
+    log_root_window_state("h511_before");
     for (unsigned long long index = 0; index < count && index < 8; ++index) {
         id window = collection_object_at(windows, index);
         const char *name = class_name_or_nil(window);
         if (!strstr(name, "RootSceneWindow")) continue;
-        line("event=h510_root_visibility_request pid=%d window=%p class=%s",
+        line("event=h511_root_visibility_request pid=%d window=%p class=%s",
              getpid(), (__bridge void *) window, name);
         if ([window respondsToSelector:@selector(makeKeyAndVisible)])
             ((void (*)(id, SEL)) objc_msgSend)(window,
                                                @selector(makeKeyAndVisible));
         break;
     }
-    log_root_window_state("h510_after");
+    log_root_window_state("h511_after");
+}
+
+static void schedule_root_visibility_request(void)
+{
+    CFRunLoopRef mainRunLoop = CFRunLoopGetMain();
+    line("event=h511_runloop_enqueue_begin pid=%d main=%p commonModes=%d",
+         getpid(), (void *) mainRunLoop, kCFRunLoopCommonModes ? 1 : 0);
+    if (!mainRunLoop) {
+        line("event=h511_runloop_enqueue_failed pid=%d reason=no-main-runloop",
+             getpid());
+        return;
+    }
+    CFRunLoopPerformBlock(mainRunLoop, kCFRunLoopCommonModes, ^{
+        line("event=h511_main_block_enter pid=%d main=%p", getpid(),
+             (void *) mainRunLoop);
+        request_root_window_visible();
+        line("event=h511_main_block_exit pid=%d main=%p", getpid(),
+             (void *) mainRunLoop);
+    });
+    CFRunLoopWakeUp(mainRunLoop);
+    line("event=h511_runloop_enqueued pid=%d main=%p wakeupSent=1",
+         getpid(), (void *) mainRunLoop);
 }
 
 static void schedule_post_visibility_snapshot(void)
@@ -989,9 +1011,7 @@ static void snapshot(const char *phase, unsigned sample)
     snapshot_windows("application", application, sample);
     if (sample == 4 && !gRootVisibilityRequested) {
         gRootVisibilityRequested = true;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            request_root_window_visible();
-        });
+        schedule_root_visibility_request();
     }
 }
 
@@ -1014,7 +1034,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
-    line("observer load process=%s pid=%d build=H510", process, getpid());
+    line("observer load process=%s pid=%d build=H511", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),

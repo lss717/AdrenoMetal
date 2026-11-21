@@ -45,7 +45,7 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H533",
+        "build=H534",
         "if (sample == 0) {",
         "inventory_springboard_classes();",
         "probe_nonblocking_shared_instances();",
@@ -108,10 +108,10 @@ def main():
         "method_setImplementation(",
         "observer bypass installed",
         "observer bypass pid=",
-        "H533_LS",
+        "H534_LS",
     ):
         require(marker in ls_observer,
-                f"H533 LaunchServices observer bypass missing: {marker}")
+                f"H534 LaunchServices observer bypass missing: {marker}")
     for forbidden in (
         "NSSetUncaughtExceptionHandler",
         "requestSceneCreation",
@@ -149,7 +149,7 @@ def main():
     ):
         require(forbidden not in bootstrap,
                 f"H483 wrapper retained one-shot behavior: {forbidden}")
-    print("H533 SpringBoard observer gate: PASS")
+    print("H534 SpringBoard observer gate: PASS")
 
 
 if __name__ == "__main__":

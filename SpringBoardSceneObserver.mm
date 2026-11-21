@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H488 read-only SpringBoard scene observer. It is injected through the
+// H489 read-only SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -17,6 +17,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -30,7 +31,7 @@ static const uint32_t kMaxLog = 184;
 
 static io_connect_t gConnection;
 static uint32_t gSelector;
-static unsigned gBudget = 512;
+static unsigned gBudget = 1024;
 static int gConsole = -2;
 
 extern "C" {
@@ -155,61 +156,51 @@ static const char *class_name_or_nil(id object)
     return object ? object_getClassName(object) : "nil";
 }
 
-static id call_object_selector(id object, const char *name)
+static bool selector_name_is_relevant(const char *name)
 {
-    if (!object || !name) return nil;
-    SEL selector = sel_getUid(name);
-    if (![(id) object respondsToSelector:selector]) return nil;
-    @try {
-        return ((id (*)(id, SEL)) objc_msgSend)((id) object, selector);
-    } @catch (id ignored) {
-        return nil;
+    static const char *const tokens[] = {
+        "shared", "main", "scene", "workspace", "window", "display"
+    };
+    if (!name) return false;
+    for (unsigned index = 0; index < sizeof tokens / sizeof tokens[0]; ++index) {
+        if (strstr(name, tokens[index])) return true;
     }
+    return false;
 }
 
-static void probe_shared_class(const char *name, const char *const *selectors,
-                               unsigned count)
+static void inventory_class(const char *name)
 {
     Class cls = NSClassFromString([NSString stringWithUTF8String:name]);
     line("sbclass name=%s exists=%d", name, cls ? 1 : 0);
     if (!cls) return;
-    for (unsigned index = 0; index < count; ++index) {
-        SEL selector = sel_getUid(selectors[index]);
-        if (![(id) cls respondsToSelector:selector]) continue;
-        id value = call_object_selector((id) cls, selectors[index]);
-        line("sbclass name=%s selector=%s value=%d class=%s",
-             name, selectors[index], value ? 1 : 0, class_name_or_nil(value));
+    unsigned methodCount = 0;
+    Method *methods = class_copyMethodList(object_getClass(cls), &methodCount);
+    unsigned shown = 0;
+    line("sbclass name=%s classMethods=%u", name, methodCount);
+    for (unsigned index = 0; methods && index < methodCount && shown < 32; ++index) {
+        const char *selector = sel_getName(method_getName(methods[index]));
+        if (!selector_name_is_relevant(selector)) continue;
+        line("sbclass name=%s classSelector=%s", name, selector);
+        ++shown;
     }
+    free(methods);
 }
 
-static void probe_springboard_classes(unsigned sample)
+static void inventory_springboard_classes(void)
 {
-    static const char *const workspace[] = {
-        "_sharedInstance", "sharedInstance", "mainWorkspace", "_mainWorkspace"
+    static const char *const classes[] = {
+        "SBMainWorkspace",
+        "SBSceneManagerCoordinator",
+        "SBMainDisplaySceneManager",
+        "SBWindowSceneManager",
+        "SBApplicationController",
+        "FBSceneManager",
+        "SpringBoard"
     };
-    static const char *const coordinator[] = { "_sharedInstance", "sharedInstance" };
-    static const char *const sceneManager[] = {
-        "_sharedInstance", "sharedInstance", "mainDisplaySceneManager",
-        "_mainDisplaySceneManager"
-    };
-    static const char *const windowScene[] = {
-        "_sharedInstance", "sharedInstance", "activeDisplayWindowScene",
-        "_activeDisplayWindowScene", "mainDisplayWindowScene",
-        "_mainDisplayWindowScene"
-    };
-    line("sbprobe sample=%u", sample);
-    probe_shared_class("SBMainWorkspace", workspace,
-                       sizeof workspace / sizeof workspace[0]);
-    probe_shared_class("SBSceneManagerCoordinator", coordinator,
-                       sizeof coordinator / sizeof coordinator[0]);
-    probe_shared_class("SBMainDisplaySceneManager", sceneManager,
-                       sizeof sceneManager / sizeof sceneManager[0]);
-    probe_shared_class("SBWindowSceneManager", windowScene,
-                       sizeof windowScene / sizeof windowScene[0]);
-    probe_shared_class("SBApplicationController", coordinator,
-                       sizeof coordinator / sizeof coordinator[0]);
-    probe_shared_class("FBSceneManager", coordinator,
-                       sizeof coordinator / sizeof coordinator[0]);
+    line("sbinventory begin");
+    for (unsigned index = 0; index < sizeof classes / sizeof classes[0]; ++index)
+        inventory_class(classes[index]);
+    line("sbinventory end");
 }
 
 static id normalized_collection(id collection)
@@ -235,7 +226,7 @@ static void snapshot(const char *phase, unsigned sample)
 
     Class workspaceClass = NSClassFromString(@"FBSWorkspace");
     Class sceneClass = NSClassFromString(@"FBScene");
-    probe_springboard_classes(sample);
+    if (sample == 0) inventory_springboard_classes();
     line("sample=%u phase=%s pid=%d workspaceClass=%d sceneClass=%d",
          sample, phase, getpid(), workspaceClass ? 1 : 0, sceneClass ? 1 : 0);
 
@@ -321,7 +312,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
     if (!process || strncmp(process, "SpringBoard", 11)) return;
-    line("observer load process=%s pid=%d build=H488", process, getpid());
+    line("observer load process=%s pid=%d build=H489", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0, 480.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),

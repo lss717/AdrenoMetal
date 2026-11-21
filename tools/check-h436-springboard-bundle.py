@@ -20,8 +20,8 @@ def main():
     observer = OBSERVER.read_text(encoding="utf-8")
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
 
-    require('caller("builder", "build", "H514");' in trace,
-            "H514 trace marker missing")
+    require('caller("builder", "build", "H515");' in trace,
+            "H515 trace marker missing")
     for marker in (
         "state->owner_status = pid_for_task(",
         'proc_name(state->owner_pid, state->owner_name',
@@ -43,7 +43,7 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H514",
+        "build=H515",
         "if (sample == 0) {",
         "inventory_springboard_classes();",
         "probe_nonblocking_shared_instances();",
@@ -95,20 +95,9 @@ def main():
         'event=h513_snapshot_enter',
         'event=h513_dlopen',
         'event=h513_snapshot_exit',
-        'event=h514_shared_application_enter',
-        'event=h514_shared_application_return',
-        'event=h514_app_poll_enter',
-        'event=h514_application_notification',
-        'event=h512_app_monitor_start',
-        'event=h512_app_ready',
-        'event=h512_app_wait',
-        'event=h512_runloop_enqueue_begin',
-        'event=h512_runloop_enqueued',
-        'event=h512_main_block_enter',
-        'event=h512_main_block_exit',
-        'event=h512_root_visibility_request',
-        "CFRunLoopPerformBlock(mainRunLoop, kCFRunLoopCommonModes",
-        "CFRunLoopWakeUp(mainRunLoop)",
+        'event=h515_shared_application_enter',
+        'event=h515_shared_application_return',
+        'event=h515_application_notification',
         'schedule_post_visibility_snapshot();',
         'snapshot("springboard", 6);',
         'if (sample == 4 || sample == 5 || sample == 6)',
@@ -156,7 +145,7 @@ def main():
     ):
         require(forbidden not in bootstrap,
                 f"H483 wrapper retained one-shot behavior: {forbidden}")
-    print("H514 SpringBoard observer gate: PASS")
+    print("H515 SpringBoard observer gate: PASS")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H514 SpringBoard scene observer. It is injected through the
+// H515 SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -49,9 +49,8 @@ static unsigned gLayerCommitEventCount;
 static unsigned gWindowCommitCount[2];
 static unsigned gWindowVisibilityEventCount;
 static bool gVisibilitySnapshotScheduled;
-static bool gRootVisibilityRequested;
-static bool gApplicationReadinessWorkerStarted;
 static IMP gApplicationSharedApplication;
+static id gObservedApplication;
 static id gDidFinishLaunchingObserver;
 static id gWillEnterForegroundObserver;
 static id gDidBecomeActiveObserver;
@@ -63,11 +62,12 @@ static const char *class_name_or_nil(id object);
 
 static id trace_application_shared_application(id self, SEL selector)
 {
-    line("event=h514_shared_application_enter receiver=%s thread=%p main=%d",
+    line("event=h515_shared_application_enter receiver=%s thread=%p main=%d",
          class_name_or_nil(self), (void *) pthread_self(), pthread_main_np());
     id application = gApplicationSharedApplication
         ? ((id (*)(id, SEL)) gApplicationSharedApplication)(self, selector) : nil;
-    line("event=h514_shared_application_return app=%p class=%s",
+    if (application) gObservedApplication = application;
+    line("event=h515_shared_application_return app=%p class=%s",
          (__bridge void *) application, class_name_or_nil(application));
     return application;
 }
@@ -675,83 +675,6 @@ static void log_root_window_state(const char *phase)
     }
 }
 
-static void request_root_window_visible(void)
-{
-    Class applicationClass = NSClassFromString(@"UIApplication");
-    id application = applicationClass
-        ? ((id (*)(id, SEL)) objc_msgSend)(
-              (id) applicationClass, @selector(sharedApplication))
-        : nil;
-    id windows = normalized_collection(read_object(application, "windows"));
-    const unsigned long long count = collection_count(windows);
-    log_root_window_state("h512_before");
-    for (unsigned long long index = 0; index < count && index < 8; ++index) {
-        id window = collection_object_at(windows, index);
-        const char *name = class_name_or_nil(window);
-        if (!strstr(name, "RootSceneWindow")) continue;
-        line("event=h512_root_visibility_request pid=%d window=%p class=%s",
-             getpid(), (__bridge void *) window, name);
-        if ([window respondsToSelector:@selector(makeKeyAndVisible)])
-            ((void (*)(id, SEL)) objc_msgSend)(window,
-                                               @selector(makeKeyAndVisible));
-        break;
-    }
-    log_root_window_state("h512_after");
-}
-
-static void schedule_root_visibility_request(void)
-{
-    CFRunLoopRef mainRunLoop = CFRunLoopGetMain();
-    line("event=h512_runloop_enqueue_begin pid=%d main=%p commonModes=%d",
-         getpid(), (void *) mainRunLoop, kCFRunLoopCommonModes ? 1 : 0);
-    if (!mainRunLoop) {
-        line("event=h512_runloop_enqueue_failed pid=%d reason=no-main-runloop",
-             getpid());
-        return;
-    }
-    CFRunLoopPerformBlock(mainRunLoop, kCFRunLoopCommonModes, ^{
-        line("event=h512_main_block_enter pid=%d main=%p", getpid(),
-             (void *) mainRunLoop);
-        request_root_window_visible();
-        line("event=h512_main_block_exit pid=%d main=%p", getpid(),
-             (void *) mainRunLoop);
-    });
-    CFRunLoopWakeUp(mainRunLoop);
-    line("event=h512_runloop_enqueued pid=%d main=%p wakeupSent=1",
-         getpid(), (void *) mainRunLoop);
-}
-
-static void wait_for_application_ready_then_request_visibility(void)
-{
-    line("event=h512_app_monitor_start pid=%d", getpid());
-    for (unsigned poll = 0; poll < 240; ++poll) {
-        line("event=h514_app_poll_enter pid=%d poll=%u thread=%p main=%d",
-             getpid(), poll, (void *) pthread_self(), pthread_main_np());
-        Class applicationClass = NSClassFromString(@"UIApplication");
-        id application = applicationClass
-            ? ((id (*)(id, SEL)) objc_msgSend)(
-                  (id) applicationClass, @selector(sharedApplication))
-            : nil;
-        id windows = normalized_collection(read_object(application, "windows"));
-        const unsigned long long count = collection_count(windows);
-        if (application && windows && count > 0) {
-            line("event=h512_app_ready pid=%d app=%p windows=%llu poll=%u",
-                 getpid(), (__bridge void *) application, count, poll);
-            if (!gRootVisibilityRequested) {
-                gRootVisibilityRequested = true;
-                schedule_root_visibility_request();
-            }
-            return;
-        }
-        if (poll % 12 == 0) {
-            line("event=h512_app_wait pid=%d app=%d windows=%llu poll=%u",
-                 getpid(), application ? 1 : 0, count, poll);
-        }
-        sleep(5);
-    }
-    line("event=h512_app_ready_timeout pid=%d", getpid());
-}
-
 static void schedule_post_visibility_snapshot(void)
 {
     if (gVisibilitySnapshotScheduled) return;
@@ -844,15 +767,17 @@ static void install_application_notifications(void)
                     object:nil
                      queue:nil
                 usingBlock:^(NSNotification * __unused notification) {
-        line("event=h514_application_notification name=did_finish_launching pid=%d thread=%p main=%d",
-             getpid(), (void *) pthread_self(), pthread_main_np());
+        gObservedApplication = notification.object;
+        line("event=h515_application_notification name=did_finish_launching pid=%d thread=%p main=%d app=%p",
+             getpid(), (void *) pthread_self(), pthread_main_np(),
+             (__bridge void *) notification.object);
     }];
     gWillEnterForegroundObserver = [center
         addObserverForName:@"UIApplicationWillEnterForegroundNotification"
                     object:nil
                      queue:nil
                 usingBlock:^(NSNotification * __unused notification) {
-        line("event=h514_application_notification name=will_enter_foreground pid=%d thread=%p main=%d",
+        line("event=h515_application_notification name=will_enter_foreground pid=%d thread=%p main=%d",
              getpid(), (void *) pthread_self(), pthread_main_np());
     }];
     gDidBecomeActiveObserver = [center
@@ -860,7 +785,7 @@ static void install_application_notifications(void)
                     object:nil
                      queue:nil
                 usingBlock:^(NSNotification * __unused notification) {
-        line("event=h514_application_notification name=did_become_active pid=%d thread=%p main=%d",
+        line("event=h515_application_notification name=did_become_active pid=%d thread=%p main=%d",
              getpid(), (void *) pthread_self(), pthread_main_np());
     }];
 }
@@ -1075,17 +1000,7 @@ static void snapshot(const char *phase, unsigned sample)
     line("sample=%u cadisplay=%d list=%llu main=%d", sample, displayClass ? 1 : 0,
          displayCount, mainDisplay ? 1 : 0);
 
-    Class applicationClass = NSClassFromString(@"UIApplication");
-    id application = nil;
-    @try {
-        if (applicationClass) {
-            SEL shared = @selector(sharedApplication);
-            if ([(id) applicationClass respondsToSelector:shared])
-                application = ((id (*)(id, SEL)) objc_msgSend)((id) applicationClass, shared);
-        }
-    } @catch (id ignored) {
-        application = nil;
-    }
+    id application = gObservedApplication;
     id delegate = read_object(application, "delegate");
     id connected = normalized_collection(read_object(application, "connectedScenes"));
     id windows = normalized_collection(read_object(application, "windows"));
@@ -1101,12 +1016,6 @@ static void snapshot(const char *phase, unsigned sample)
     line("sample=%u appState=%llu hasAppState=%d",
          sample, applicationState, hasApplicationState ? 1 : 0);
     snapshot_windows("application", application, sample);
-    if (sample == 4 && !gApplicationReadinessWorkerStarted) {
-        gApplicationReadinessWorkerStarted = true;
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            wait_for_application_ready_then_request_visibility();
-        });
-    }
     line("event=h513_snapshot_exit sample=%u phase=%s pid=%d",
          sample, phase, getpid());
 }
@@ -1138,7 +1047,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
-    line("observer load process=%s pid=%d build=H514", process, getpid());
+    line("observer load process=%s pid=%d build=H515", process, getpid());
     install_application_notifications();
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {

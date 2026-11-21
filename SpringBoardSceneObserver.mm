@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H490 read-only SpringBoard scene observer. It is injected through the
+// H494 read-only SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -262,6 +262,44 @@ static void log_object_field(const char *scope, unsigned index, id scene, const 
          value ? 1 : 0, class_name_or_nil(value));
 }
 
+static void snapshot_window(const char *scope, unsigned index, id window)
+{
+    unsigned long long hidden = 0;
+    unsigned long long level = 0;
+    const bool hasHidden = read_integer(window, "isHidden", &hidden);
+    const bool hasLevel = read_integer(window, "windowLevel", &level);
+    id layer = read_object(window, "layer");
+    id rootViewController = read_object(window, "rootViewController");
+    id windowScene = read_object(window, "windowScene");
+    line("window=%s/%u class=%s hidden=%llu hasHidden=%d level=%llu hasLevel=%d",
+         scope, index, class_name_or_nil(window), hidden, hasHidden, level, hasLevel);
+    line("window=%s/%u layer=%d class=%s rootVC=%d class=%s windowScene=%d",
+         scope, index, layer ? 1 : 0, class_name_or_nil(layer),
+         rootViewController ? 1 : 0, class_name_or_nil(rootViewController),
+         windowScene ? 1 : 0);
+    if (layer) log_object_field("window", index, layer, "contents");
+}
+
+static void snapshot_windows(const char *scope, id owner)
+{
+    id windows = normalized_collection(read_object(owner, "windows"));
+    if (!windows) windows = normalized_collection(read_object(owner, "_windows"));
+    if (!windows) {
+        line("windows=%s present=0", scope);
+        return;
+    }
+    unsigned long long count = 0;
+    if ([windows respondsToSelector:@selector(count)])
+        count = ((unsigned long long (*)(id, SEL)) objc_msgSend)(windows, @selector(count));
+    line("windows=%s present=1 class=%s count=%llu",
+         scope, class_name_or_nil(windows), count);
+    for (unsigned long long index = 0; index < count && index < 8; ++index) {
+        id window = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(
+            windows, @selector(objectAtIndex:), index);
+        if (window) snapshot_window(scope, (unsigned) index, window);
+    }
+}
+
 static void snapshot(const char *phase, unsigned sample)
 {
     dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices",
@@ -319,6 +357,12 @@ static void snapshot(const char *phase, unsigned sample)
         };
         for (unsigned f = 0; f < sizeof fields / sizeof fields[0]; ++f)
             log_object_field("scene", (unsigned) i, scene, fields[f]);
+        id delegate = read_object(scene, "delegate");
+        if (delegate) {
+            line("scene=%u delegateClass=%s", (unsigned) i,
+                 class_name_or_nil(delegate));
+            snapshot_windows("scene", delegate);
+        }
     }
 
     Class displayClass = NSClassFromString(@"CADisplay");
@@ -351,13 +395,14 @@ static void snapshot(const char *phase, unsigned sample)
         ? ((unsigned long long (*)(id, SEL)) objc_msgSend)(windows, @selector(count)) : 0;
     line("sample=%u app=%d delegate=%s scenes=%llu windows=%llu",
          sample, application ? 1 : 0, class_name_or_nil(delegate), connectedCount, windowCount);
+    snapshot_windows("application", application);
 }
 
 __attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
     if (!process || strncmp(process, "SpringBoard", 11)) return;
-    line("observer load process=%s pid=%d build=H490", process, getpid());
+    line("observer load process=%s pid=%d build=H494", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0, 480.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),

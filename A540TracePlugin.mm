@@ -80,6 +80,16 @@ static id gDeviceInstance;
 static id gQueueInstance;
 static NSUInteger gTraceGPUPriority;
 static NSUInteger gTraceBackgroundGPUPriority;
+static IMP gServerContextSetLayer;
+static IMP gServerContextSetObjectForSlot;
+static IMP gServerContextWaitForCommitId;
+static IMP gServerLayerDidCommit;
+static IMP gServerDisplayPresentSurface;
+static unsigned gServerContextLayerEvents;
+static unsigned gServerContextSlotEvents;
+static unsigned gServerContextCommitWaits;
+static unsigned gServerLayerCommitEvents;
+static unsigned gServerDisplaySurfaceEvents;
 
 static bool connectAccelerator(void);
 
@@ -439,6 +449,136 @@ observe_context_state(const char *why, id server, uint32_t id,
              (unsigned long long) root, root_sublayers, tree_nodes,
              contents_nodes);
     caller("srv", "ctxchange", detail);
+}
+
+static bool install_trace_instance_hook(Class cls, const char *name,
+                                        IMP replacement, IMP *original)
+{
+    if (!cls || !original) return false;
+    Method method = class_getInstanceMethod(cls, sel_registerName(name));
+    if (!method) return false;
+    *original = method_getImplementation(method);
+    method_setImplementation(method, replacement);
+    return true;
+}
+
+static void trace_server_context_layer(id self, SEL selector, id layer)
+{
+    ((void (*)(id, SEL, id)) gServerContextSetLayer)(self, selector, layer);
+    if (gServerContextLayerEvents >= 24) return;
+    ++gServerContextLayerEvents;
+    const uint32_t contextId = observer_u32(self, "contextId", UINT32_MAX);
+    const uint32_t displayId = observer_u32(self, "displayId", UINT32_MAX);
+    id contents = observer_object(layer, "contents");
+    const unsigned long long sublayers = observer_u64(
+        observer_object(layer, "sublayers"), "count", 0);
+    char detail[220];
+    snprintf(detail, sizeof detail,
+             "ctx=0x%x display=0x%x layer=%s contents=%s sublayers=%llu owner=%d/%s",
+             contextId, displayId,
+             layer ? object_getClassName(layer) : "-",
+             contents ? object_getClassName(contents) : "-", sublayers,
+             getpid(), getprogname() ? getprogname() : "?");
+    caller("srv", "event_context_layer", detail);
+}
+
+static void trace_server_context_slot(id self, SEL selector, id object, NSUInteger slot)
+{
+    ((void (*)(id, SEL, id, NSUInteger)) gServerContextSetObjectForSlot)(
+        self, selector, object, slot);
+    if (gServerContextSlotEvents >= 24) return;
+    ++gServerContextSlotEvents;
+    const uint32_t contextId = observer_u32(self, "contextId", UINT32_MAX);
+    const uint32_t displayId = observer_u32(self, "displayId", UINT32_MAX);
+    id layer = observer_object(self, "layer");
+    id contents = observer_object(layer, "contents");
+    char detail[220];
+    snprintf(detail, sizeof detail,
+             "ctx=0x%x display=0x%x slot=%llu object=%s root=%s contents=%s owner=%d/%s",
+             contextId, displayId, (unsigned long long) slot,
+             object ? object_getClassName(object) : "-",
+             layer ? object_getClassName(layer) : "-",
+             contents ? object_getClassName(contents) : "-",
+             getpid(), getprogname() ? getprogname() : "?");
+    caller("srv", "event_context_slot", detail);
+}
+
+static void trace_server_context_commit_wait(id self, SEL selector,
+                                             uint32_t commitId, double timeout)
+{
+    ((void (*)(id, SEL, uint32_t, double)) gServerContextWaitForCommitId)(
+        self, selector, commitId, timeout);
+    if (gServerContextCommitWaits >= 24) return;
+    ++gServerContextCommitWaits;
+    const uint32_t contextId = observer_u32(self, "contextId", UINT32_MAX);
+    char detail[200];
+    snprintf(detail, sizeof detail,
+             "ctx=0x%x commit=0x%x timeout=%.3f owner=%d/%s",
+             contextId, commitId, timeout, getpid(),
+             getprogname() ? getprogname() : "?");
+    caller("srv", "event_context_commit_wait", detail);
+}
+
+static void trace_server_layer_commit(id self, SEL selector, id layer)
+{
+    ((void (*)(id, SEL, id)) gServerLayerDidCommit)(self, selector, layer);
+    if (gServerLayerCommitEvents >= 32) return;
+    ++gServerLayerCommitEvents;
+    id context = observer_object(self, "context");
+    const uint32_t contextId = observer_u32(context, "contextId", UINT32_MAX);
+    id contents = observer_object(self, "contents");
+    char detail[220];
+    snprintf(detail, sizeof detail,
+             "layer=%p class=%s ctx=0x%x contents=%s owner=%d/%s",
+             self, object_getClassName(self), contextId,
+             contents ? object_getClassName(contents) : "-",
+             getpid(), getprogname() ? getprogname() : "?");
+    caller("srv", "event_layer_commit", detail);
+}
+
+static void trace_server_display_surface(id self, SEL selector,
+                                         id surface, id options)
+{
+    ((void (*)(id, SEL, id, id)) gServerDisplayPresentSurface)(
+        self, selector, surface, options);
+    if (gServerDisplaySurfaceEvents >= 16) return;
+    ++gServerDisplaySurfaceEvents;
+    const uint32_t displayId = observer_u32(self, "displayId", UINT32_MAX);
+    char detail[200];
+    snprintf(detail, sizeof detail,
+             "display=0x%x surface=%s options=%s owner=%d/%s",
+             displayId, surface ? object_getClassName(surface) : "-",
+             options ? object_getClassName(options) : "-", getpid(),
+             getprogname() ? getprogname() : "?");
+    caller("srv", "event_display_surface", detail);
+}
+
+static void install_server_ca_event_hooks(void)
+{
+    Class context = NSClassFromString(@"CAContext");
+    Class layer = NSClassFromString(@"CALayer");
+    Class display = NSClassFromString(@"CAWindowServerDisplay");
+    const bool contextLayer = install_trace_instance_hook(
+        context, "setLayer:", (IMP) trace_server_context_layer,
+        &gServerContextSetLayer);
+    const bool contextSlot = install_trace_instance_hook(
+        context, "setObject:forSlot:", (IMP) trace_server_context_slot,
+        &gServerContextSetObjectForSlot);
+    const bool commitWait = install_trace_instance_hook(
+        context, "waitForCommitId:timeout:", (IMP) trace_server_context_commit_wait,
+        &gServerContextWaitForCommitId);
+    const bool layerCommit = install_trace_instance_hook(
+        layer, "_didCommitLayer:", (IMP) trace_server_layer_commit,
+        &gServerLayerDidCommit);
+    const bool displaySurface = install_trace_instance_hook(
+        display, "presentSurface:withOptions:",
+        (IMP) trace_server_display_surface, &gServerDisplayPresentSurface);
+    char detail[180];
+    snprintf(detail, sizeof detail,
+             "contextLayer=%d contextSlot=%d commitWait=%d layerCommit=%d displaySurface=%d",
+             contextLayer ? 1 : 0, contextSlot ? 1 : 0, commitWait ? 1 : 0,
+             layerCommit ? 1 : 0, displaySurface ? 1 : 0);
+    caller("srv", "event_hooks", detail);
 }
 
 /* H236ht: the headless decision is two Objective-C return values inside
@@ -1797,12 +1937,13 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H500");
+    caller("builder", "build", "H506");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */
     Class serverClass = NSClassFromString(@"CAWindowServer");
     Class ctxClass = NSClassFromString(@"CAContext");
+    install_server_ca_event_hooks();
     snprintf(detail, sizeof detail, "early server=%d ctx=%d", serverClass ? 1 : 0, ctxClass ? 1 : 0);
     caller("builder", "early", detail);
     if (serverClass) {

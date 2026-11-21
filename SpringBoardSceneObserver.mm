@@ -41,6 +41,13 @@ static unsigned gLayerBudget;
 static uint32_t gHostContextIds[8];
 static unsigned gHostContextCount;
 static uintptr_t gLayerTrail[16];
+static unsigned gHostContextEventCount;
+static unsigned gContextLayerEventCount;
+static unsigned gTransactionEventCount;
+static unsigned gWindowLayerEventCount;
+static unsigned gWindowContentsEventCount;
+static unsigned gLayerCommitEventCount;
+static unsigned gWindowCommitCount[2];
 
 extern "C" {
 int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
@@ -422,6 +429,183 @@ static void snapshot_layer_tree(const char *scope, unsigned windowIndex,
     }
 }
 
+static const char *window_kind_for_layer(id layer)
+{
+    id current = layer;
+    for (unsigned depth = 0; current && depth < 14; ++depth) {
+        id delegate = read_object(current, "delegate");
+        const char *name = class_name_or_nil(delegate);
+        if (strstr(name, "RootSceneWindow")) return "root";
+        if (strstr(name, "StatusBarWindow")) return "status";
+        current = read_object(current, "superlayer");
+    }
+    return "-";
+}
+
+static unsigned window_kind_index(const char *kind)
+{
+    if (!strcmp(kind, "root")) return 0;
+    if (!strcmp(kind, "status")) return 1;
+    return 2;
+}
+
+static void log_layer_event(const char *event, const char *kind, id layer)
+{
+    unsigned long long hasCommitted = 0;
+    const bool committed = read_integer(layer, "hasBeenCommitted", &hasCommitted);
+    id contents = read_object(layer, "contents");
+    id delegate = read_object(layer, "delegate");
+    id superlayer = read_object(layer, "superlayer");
+    id sublayers = normalized_collection(read_object(layer, "sublayers"));
+    line("event=%s window=%s pid=%d layer=%p class=%s contents=%d class=%.24s delegate=%.24s super=%.24s sublayers=%llu committed=%llu hasCommitted=%d",
+         event, kind, getpid(), (void *) layer, class_name_or_nil(layer),
+         contents ? 1 : 0, class_name_or_nil(contents),
+         class_name_or_nil(delegate), class_name_or_nil(superlayer),
+         collection_count(sublayers), hasCommitted, committed ? 1 : 0);
+}
+
+static bool remember_context_event(uint32_t contextId)
+{
+    static uint32_t ids[8];
+    static unsigned count;
+    if (!contextId || count == sizeof ids / sizeof ids[0]) return false;
+    for (unsigned index = 0; index < count; ++index)
+        if (ids[index] == contextId) return false;
+    ids[count++] = contextId;
+    return true;
+}
+
+static IMP gLayerHostSetContextId;
+static IMP gLayerHostDidBecomeVisible;
+static IMP gContextSetLayer;
+static IMP gLayerSetContents;
+static IMP gLayerDidCommit;
+static IMP gTransactionFlushAsRunLoopObserver;
+
+static void trace_layer_host_context_id(id self, SEL selector, uint32_t contextId)
+{
+    ((void (*)(id, SEL, uint32_t)) gLayerHostSetContextId)(self, selector, contextId);
+    if (gHostContextEventCount >= 16 || !remember_context_event(contextId)) return;
+    ++gHostContextEventCount;
+    id context = read_object(self, "context");
+    unsigned long long contextObjectId = 0;
+    const bool hasContextObjectId = read_integer(context, "contextId", &contextObjectId);
+    line("event=ca_host_context_bind pid=%d layer=%p host=0x%x context=%d contextId=0x%x hasContextId=%d contextLayer=%.24s",
+         getpid(), (void *) self, (unsigned) contextId, context ? 1 : 0,
+         (unsigned) contextObjectId, hasContextObjectId ? 1 : 0,
+         class_name_or_nil(read_object(context, "layer")));
+    log_layer_event("ca_host_context_layer", window_kind_for_layer(self), self);
+}
+
+static void trace_layer_host_visible(id self, SEL selector, BOOL visible)
+{
+    ((void (*)(id, SEL, BOOL)) gLayerHostDidBecomeVisible)(
+        self, selector, visible);
+    unsigned long long contextId = 0;
+    const bool hasContextId = read_integer(self, "contextId", &contextId);
+    line("event=ca_host_visible pid=%d visible=%d layer=%p host=0x%x hasContextId=%d window=%s",
+         getpid(), visible ? 1 : 0, (void *) self, (unsigned) contextId,
+         hasContextId ? 1 : 0, window_kind_for_layer(self));
+}
+
+static void trace_context_set_layer(id self, SEL selector, id layer)
+{
+    ((void (*)(id, SEL, id)) gContextSetLayer)(self, selector, layer);
+    if (gContextLayerEventCount >= 16) return;
+    ++gContextLayerEventCount;
+    unsigned long long contextId = 0;
+    const bool hasContextId = read_integer(self, "contextId", &contextId);
+    line("event=ca_context_set_layer pid=%d context=%p contextId=0x%x hasContextId=%d layer=%.28s",
+         getpid(), (void *) self, (unsigned) contextId, hasContextId ? 1 : 0,
+         class_name_or_nil(layer));
+    log_layer_event("ca_context_layer", window_kind_for_layer(layer), layer);
+}
+
+static void trace_layer_set_contents(id self, SEL selector, id contents)
+{
+    ((void (*)(id, SEL, id)) gLayerSetContents)(self, selector, contents);
+    const char *kind = window_kind_for_layer(self);
+    if (!strcmp(kind, "-") || gWindowContentsEventCount >= 12) return;
+    ++gWindowContentsEventCount;
+    id resolved = read_object(self, "contents");
+    line("event=ca_layer_set_contents window=%s pid=%d layer=%p class=%s input=%.24s contents=%d resolved=%.24s",
+         kind, getpid(), (void *) self, class_name_or_nil(self),
+         class_name_or_nil(contents), resolved ? 1 : 0,
+         class_name_or_nil(resolved));
+}
+
+static void trace_layer_did_commit(id self, SEL selector, id layer)
+{
+    ((void (*)(id, SEL, id)) gLayerDidCommit)(self, selector, layer);
+    const char *kind = window_kind_for_layer(self);
+    const unsigned kindIndex = window_kind_index(kind);
+    const bool target = kindIndex < 2;
+    if (target && gWindowCommitCount[kindIndex] < 12)
+        ++gWindowCommitCount[kindIndex];
+    else if (!target && gLayerCommitEventCount >= 24)
+        return;
+    ++gLayerCommitEventCount;
+    log_layer_event("ca_layer_commit", kind, self);
+}
+
+static void trace_transaction_flush(id self, SEL selector)
+{
+    ((void (*)(id, SEL)) gTransactionFlushAsRunLoopObserver)(self, selector);
+    if (gTransactionEventCount >= 12) return;
+    ++gTransactionEventCount;
+    line("event=ca_transaction_flush pid=%d transaction=%p thread=%p contexts=%u hostEvents=%u layerCommits=%u",
+         getpid(), (void *) self, (void *) pthread_self(), gContextLayerEventCount,
+         gHostContextEventCount, gLayerCommitEventCount);
+}
+
+static bool install_instance_hook(Class cls, const char *name,
+                                  IMP replacement, IMP *original)
+{
+    if (!cls || !original) return false;
+    Method method = class_getInstanceMethod(cls, sel_registerName(name));
+    if (!method) return false;
+    *original = method_getImplementation(method);
+    method_setImplementation(method, replacement);
+    return true;
+}
+
+static bool install_class_hook(Class cls, const char *name,
+                               IMP replacement, IMP *original)
+{
+    if (!cls || !original) return false;
+    Method method = class_getClassMethod(cls, sel_registerName(name));
+    if (!method) return false;
+    *original = method_getImplementation(method);
+    method_setImplementation(method, replacement);
+    return true;
+}
+
+static void install_ca_event_hooks(void)
+{
+    Class layerHost = NSClassFromString(@"CALayerHost");
+    Class context = NSClassFromString(@"CAContext");
+    Class layer = NSClassFromString(@"CALayer");
+    Class transaction = NSClassFromString(@"CATransaction");
+    const bool hostId = install_instance_hook(
+        layerHost, "setContextId:", (IMP) trace_layer_host_context_id,
+        &gLayerHostSetContextId);
+    const bool hostVisible = install_instance_hook(
+        layerHost, "layerDidBecomeVisible:", (IMP) trace_layer_host_visible,
+        &gLayerHostDidBecomeVisible);
+    const bool contextLayer = install_instance_hook(
+        context, "setLayer:", (IMP) trace_context_set_layer, &gContextSetLayer);
+    const bool contents = install_instance_hook(
+        layer, "setContents:", (IMP) trace_layer_set_contents, &gLayerSetContents);
+    const bool commit = install_instance_hook(
+        layer, "_didCommitLayer:", (IMP) trace_layer_did_commit, &gLayerDidCommit);
+    const bool flush = install_class_hook(
+        transaction, "flushAsRunLoopObserver",
+        (IMP) trace_transaction_flush, &gTransactionFlushAsRunLoopObserver);
+    line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contents=%d commit=%d flush=%d",
+         getpid(), hostId ? 1 : 0, hostVisible ? 1 : 0, contextLayer ? 1 : 0,
+         contents ? 1 : 0, commit ? 1 : 0, flush ? 1 : 0);
+}
+
 static void snapshot_view_tree(const char *scope, unsigned windowIndex,
                                unsigned *viewIndex, id view, unsigned depth,
                                unsigned *viewBudget, unsigned *layerBudget)
@@ -667,6 +851,10 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
     if (!process || strncmp(process, "SpringBoard", 11)) return;
+    dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices",
+           RTLD_NOW);
+    dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
+    install_ca_event_hooks();
     line("observer load process=%s pid=%d build=H506", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {

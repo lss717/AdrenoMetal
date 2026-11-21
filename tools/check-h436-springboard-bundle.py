@@ -20,14 +20,20 @@ def main():
     observer = OBSERVER.read_text(encoding="utf-8")
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
 
-    require('caller("builder", "build", "H500");' in trace,
-            "H500 trace marker missing")
+    require('caller("builder", "build", "H506");' in trace,
+            "H506 trace marker missing")
     for marker in (
         "state->owner_status = pid_for_task(",
         'proc_name(state->owner_pid, state->owner_name',
         'owner=%d/0x%x/%.20s',
+        'install_server_ca_event_hooks();',
+        'caller("srv", "event_context_layer", detail);',
+        'caller("srv", "event_context_slot", detail);',
+        'caller("srv", "event_context_commit_wait", detail);',
+        'caller("srv", "event_layer_commit", detail);',
+        'caller("srv", "event_display_surface", detail);',
     ):
-        require(marker in trace, f"H500 context owner marker missing: {marker}")
+        require(marker in trace, f"H506 server event marker missing: {marker}")
     for marker in (
         'strncmp(process, "SpringBoard", 11)',
         "FBSWorkspace",
@@ -67,6 +73,13 @@ def main():
         'line("sample=5 scheduler=pthread entered");',
         'line("sample=5 scheduler=pthread awake");',
         'snapshot("springboard", 5);',
+        'install_ca_event_hooks();',
+        'event=ca_host_context_bind',
+        'event=ca_host_visible',
+        'event=ca_context_set_layer',
+        'event=ca_layer_set_contents',
+        '"ca_layer_commit"',
+        'event=ca_transaction_flush',
         '"sharedInstanceIfExists"',
         "class_copyMethodList(object_getClass(cls), &methodCount)",
         'line("sbinventory begin")',

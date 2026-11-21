@@ -33,18 +33,9 @@ static void lsd_line(const char *format, ...)
     close(console);
 }
 
-static void h491_recovery_async(id self, SEL command)
+static void h491_recovery_skip(id self __unused, SEL command __unused)
 {
-    if (!gOriginalRecovery) return;
-    id retained = self;
-    lsd_line("recovery queued pid=%d", getpid());
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        @autoreleasepool {
-            lsd_line("recovery enter pid=%d", getpid());
-            gOriginalRecovery(retained, command);
-            lsd_line("recovery complete pid=%d", getpid());
-        }
-    });
+    lsd_line("recovery skipped pid=%d", getpid());
 }
 
 __attribute__((constructor)) static void h491_lsd_recovery_constructor(void)
@@ -60,7 +51,7 @@ __attribute__((constructor)) static void h491_lsd_recovery_constructor(void)
         return;
     }
     gOriginalRecovery = (void (*)(id, SEL))method_getImplementation(method);
-    method_setImplementation(method, (IMP) h491_recovery_async);
-    lsd_line("recovery async installed method=%p pid=%d",
+    method_setImplementation(method, (IMP) h491_recovery_skip);
+    lsd_line("recovery skip installed method=%p pid=%d",
              (void *) method, getpid());
 }

@@ -40,8 +40,8 @@ def main() -> int:
         'strncmp(process, "lsd", 3)',
         '"_LSInstallProgressService"',
         '"performJournalRecovery"',
-        "dispatch_get_global_queue(QOS_CLASS_UTILITY, 0)",
-        "gOriginalRecovery(retained, command)",
+        'lsd_line("recovery skipped pid=%d", getpid())',
+        "method_setImplementation(method, (IMP) h491_recovery_skip)",
         "H491_LSD",
     ):
         require(marker in shim, "missing recovery shim marker: " + marker)
@@ -53,7 +53,7 @@ def main() -> int:
     ):
         require(forbidden not in shim,
                 "recovery shim exceeds its single operation: " + forbidden)
-    print("H521 lsd wrapper and recovery-async gate: PASS")
+    print("H522 lsd wrapper and recovery-skip gate: PASS")
     return 0
 
 

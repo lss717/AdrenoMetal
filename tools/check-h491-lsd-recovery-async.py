@@ -16,12 +16,12 @@ def require(condition: bool, message: str) -> None:
 def main() -> int:
     text = SHIM.read_text(encoding="utf-8")
     for marker in (
-        'strcmp(process, "lsd")',
+        'strncmp(process, "lsd", 3)',
         '"_LSInstallProgressService"',
         '"performJournalRecovery"',
-        "gOriginalRecovery(retained, command)",
-        "dispatch_get_global_queue(QOS_CLASS_UTILITY, 0)",
-        "method_setImplementation(method, (IMP) h491_recovery_async)",
+        'lsd_line("recovery skipped pid=%d", getpid())',
+        "method_setImplementation(method, (IMP) h491_recovery_skip)",
+        "recovery skip installed",
         "recovery method missing",
     ):
         require(marker in text, "missing shim marker: " + marker)
@@ -30,6 +30,8 @@ def main() -> int:
         "dispatch_sync",
         "setImplementation(0)",
         "SpringBoard",
+        "dispatch_get_global_queue",
+        "gOriginalRecovery(retained, command)",
         "IOMobileFramebuffer",
         "NativeLegacyDisplay",
     ):

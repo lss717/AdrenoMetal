@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H497 read-only SpringBoard scene observer. It is injected through the
+// H498 read-only SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -37,6 +37,7 @@ static unsigned gViewBudget;
 static unsigned gLayerBudget;
 static uint32_t gHostContextIds[8];
 static unsigned gHostContextCount;
+static uintptr_t gLayerTrail[16];
 
 extern "C" {
 int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
@@ -299,7 +300,17 @@ static void snapshot_layer_tree(const char *scope, unsigned windowIndex,
                                 unsigned viewIndex, id layer, unsigned depth,
                                 unsigned *budget)
 {
-    if (!layer || depth > 6 || !budget || *budget == 0) return;
+    if (!layer || depth > 12 || !budget || *budget == 0) return;
+    const uintptr_t address = (uintptr_t) layer;
+    for (unsigned index = 0; index < depth; ++index) {
+        if (gLayerTrail[index] == address) {
+            line("hierarchy=layer scope=%s/%u view=%u depth=%u class=%s cycle=1",
+                 scope, windowIndex, viewIndex, depth,
+                 object_getClassName(layer));
+            return;
+        }
+    }
+    gLayerTrail[depth] = address;
     --*budget;
     const char *layerClass = object_getClassName(layer);
     id contents = read_object(layer, "contents");
@@ -456,7 +467,7 @@ static void snapshot(const char *phase, unsigned sample)
     if (sample == 0) inventory_springboard_classes();
     if (sample == 5) {
         gViewBudget = 96;
-        gLayerBudget = 160;
+        gLayerBudget = 240;
         gHostContextCount = 0;
     }
     probe_nonblocking_shared_instances();
@@ -552,7 +563,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
     if (!process || strncmp(process, "SpringBoard", 11)) return;
-    line("observer load process=%s pid=%d build=H497", process, getpid());
+    line("observer load process=%s pid=%d build=H498", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0, 480.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),

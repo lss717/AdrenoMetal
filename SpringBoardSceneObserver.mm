@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H489 read-only SpringBoard scene observer. It is injected through the
+// H490 read-only SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -203,6 +203,50 @@ static void inventory_springboard_classes(void)
     line("sbinventory end");
 }
 
+static id call_checked_class_selector(const char *className, const char *selectorName)
+{
+    Class cls = NSClassFromString([NSString stringWithUTF8String:className]);
+    if (!cls) return nil;
+    SEL selector = sel_getUid(selectorName);
+    if (![(id) cls respondsToSelector:selector]) return nil;
+    @try {
+        return ((id (*)(id, SEL)) objc_msgSend)((id) cls, selector);
+    } @catch (id ignored) {
+        return nil;
+    }
+}
+
+static void inventory_instance_methods(const char *label, id object)
+{
+    if (!object) return;
+    unsigned methodCount = 0;
+    Class cls = object_getClass(object);
+    Method *methods = class_copyMethodList(cls, &methodCount);
+    unsigned shown = 0;
+    line("sbinstance name=%s class=%s methods=%u",
+         label, object_getClassName(object), methodCount);
+    for (unsigned index = 0; methods && index < methodCount && shown < 32; ++index) {
+        const char *selector = sel_getName(method_getName(methods[index]));
+        if (!selector_name_is_relevant(selector)) continue;
+        line("sbinstance name=%s selector=%s", label, selector);
+        ++shown;
+    }
+    free(methods);
+}
+
+static void probe_nonblocking_shared_instances(void)
+{
+    id mainWorkspace = call_checked_class_selector(
+        "SBMainWorkspace", "sharedInstanceIfExists");
+    id applicationController = call_checked_class_selector(
+        "SBApplicationController", "sharedInstanceIfExists");
+    line("sbexists name=SBMainWorkspace value=%d class=%s",
+         mainWorkspace ? 1 : 0, class_name_or_nil(mainWorkspace));
+    line("sbexists name=SBApplicationController value=%d class=%s",
+         applicationController ? 1 : 0, class_name_or_nil(applicationController));
+    if (mainWorkspace) inventory_instance_methods("SBMainWorkspace", mainWorkspace);
+}
+
 static id normalized_collection(id collection)
 {
     if (!collection) return nil;
@@ -227,6 +271,7 @@ static void snapshot(const char *phase, unsigned sample)
     Class workspaceClass = NSClassFromString(@"FBSWorkspace");
     Class sceneClass = NSClassFromString(@"FBScene");
     if (sample == 0) inventory_springboard_classes();
+    probe_nonblocking_shared_instances();
     line("sample=%u phase=%s pid=%d workspaceClass=%d sceneClass=%d",
          sample, phase, getpid(), workspaceClass ? 1 : 0, sceneClass ? 1 : 0);
 
@@ -312,7 +357,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
     if (!process || strncmp(process, "SpringBoard", 11)) return;
-    line("observer load process=%s pid=%d build=H489", process, getpid());
+    line("observer load process=%s pid=%d build=H490", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0, 480.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),

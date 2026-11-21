@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H513 SpringBoard scene observer. It is injected through the
+// H514 SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -51,9 +51,26 @@ static unsigned gWindowVisibilityEventCount;
 static bool gVisibilitySnapshotScheduled;
 static bool gRootVisibilityRequested;
 static bool gApplicationReadinessWorkerStarted;
+static id (*gApplicationSharedApplication)(id, SEL);
+static id gDidFinishLaunchingObserver;
+static id gWillEnterForegroundObserver;
+static id gDidBecomeActiveObserver;
 
 static void snapshot(const char *phase, unsigned sample);
 static void schedule_post_visibility_snapshot(void);
+static void line(const char *format, ...) __attribute__((format(printf, 1, 2)));
+static const char *class_name_or_nil(id object);
+
+static id trace_application_shared_application(id self, SEL selector)
+{
+    line("event=h514_shared_application_enter receiver=%s thread=%p main=%d",
+         class_name_or_nil(self), (void *) pthread_self(), pthread_main_np());
+    id application = gApplicationSharedApplication
+        ? gApplicationSharedApplication(self, selector) : nil;
+    line("event=h514_shared_application_return app=%p class=%s",
+         (__bridge void *) application, class_name_or_nil(application));
+    return application;
+}
 
 extern "C" {
 int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
@@ -708,6 +725,8 @@ static void wait_for_application_ready_then_request_visibility(void)
 {
     line("event=h512_app_monitor_start pid=%d", getpid());
     for (unsigned poll = 0; poll < 240; ++poll) {
+        line("event=h514_app_poll_enter pid=%d poll=%u thread=%p main=%d",
+             getpid(), poll, (void *) pthread_self(), pthread_main_np());
         Class applicationClass = NSClassFromString(@"UIApplication");
         id application = applicationClass
             ? ((id (*)(id, SEL)) objc_msgSend)(
@@ -777,6 +796,7 @@ static void install_ca_event_hooks(void)
     Class transaction = NSClassFromString(@"CATransaction");
     Class window = NSClassFromString(@"UIWindow");
     Class windowScene = NSClassFromString(@"UIWindowScene");
+    Class applicationClass = NSClassFromString(@"UIApplication");
     const bool hostId = install_instance_hook(
         layerHost, "setContextId:", (IMP) trace_layer_host_context_id,
         &gLayerHostSetContextId);
@@ -804,11 +824,45 @@ static void install_ca_event_hooks(void)
     const bool windowSceneVisible = install_instance_hook(
         windowScene, "_delegate_windowDidBecomeVisible:",
         (IMP) trace_window_scene_visible, &gWindowSceneDidBecomeVisible);
-    line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contextRemote=%d contents=%d commit=%d flush=%d windowHidden=%d windowMakeVisible=%d windowSceneVisible=%d",
+    const bool applicationShared = install_class_hook(
+        applicationClass, "sharedApplication",
+        (IMP) trace_application_shared_application,
+        &gApplicationSharedApplication);
+    line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contextRemote=%d contents=%d commit=%d flush=%d windowHidden=%d windowMakeVisible=%d windowSceneVisible=%d applicationShared=%d",
          getpid(), hostId ? 1 : 0, hostVisible ? 1 : 0, contextLayer ? 1 : 0,
          contextRemote ? 1 : 0, contents ? 1 : 0, commit ? 1 : 0,
          flush ? 1 : 0, windowHidden ? 1 : 0, windowMakeVisible ? 1 : 0,
-         windowSceneVisible ? 1 : 0);
+         windowSceneVisible ? 1 : 0, applicationShared ? 1 : 0);
+}
+
+static void install_application_notifications(void)
+{
+    if (gDidFinishLaunchingObserver) return;
+    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+    gDidFinishLaunchingObserver = [center
+        addObserverForName:@"UIApplicationDidFinishLaunchingNotification"
+                    object:nil
+                     queue:nil
+                usingBlock:^(NSNotification *notification) {
+        line("event=h514_application_notification name=did_finish_launching pid=%d thread=%p main=%d",
+             getpid(), (void *) pthread_self(), pthread_main_np());
+    }];
+    gWillEnterForegroundObserver = [center
+        addObserverForName:@"UIApplicationWillEnterForegroundNotification"
+                    object:nil
+                     queue:nil
+                usingBlock:^(NSNotification *notification) {
+        line("event=h514_application_notification name=will_enter_foreground pid=%d thread=%p main=%d",
+             getpid(), (void *) pthread_self(), pthread_main_np());
+    }];
+    gDidBecomeActiveObserver = [center
+        addObserverForName:@"UIApplicationDidBecomeActiveNotification"
+                    object:nil
+                     queue:nil
+                usingBlock:^(NSNotification *notification) {
+        line("event=h514_application_notification name=did_become_active pid=%d thread=%p main=%d",
+             getpid(), (void *) pthread_self(), pthread_main_np());
+    }];
 }
 
 static void snapshot_view_tree(const char *scope, unsigned windowIndex,
@@ -1084,7 +1138,8 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
-    line("observer load process=%s pid=%d build=H513", process, getpid());
+    line("observer load process=%s pid=%d build=H514", process, getpid());
+    install_application_notifications();
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         line("event=h513_dispatch_scheduled sample=%u delay_seconds=%.0f pid=%d",

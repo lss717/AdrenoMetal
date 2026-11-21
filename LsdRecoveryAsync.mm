@@ -50,7 +50,7 @@ static void h491_recovery_async(id self, SEL command)
 __attribute__((constructor)) static void h491_lsd_recovery_constructor(void)
 {
     const char *process = getprogname();
-    if (!process || strcmp(process, "lsd")) return;
+    if (!process || strncmp(process, "lsd", 3)) return;
 
     Class service = NSClassFromString(@"_LSInstallProgressService");
     SEL selector = NSSelectorFromString(@"performJournalRecovery");

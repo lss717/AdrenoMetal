@@ -1022,6 +1022,6 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
-    line("observer load process=%s pid=%d build=H519", process, getpid());
+    line("observer load process=%s pid=%d build=H520", process, getpid());
     install_application_notifications();
 }

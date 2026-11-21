@@ -37,7 +37,7 @@ def main() -> int:
                 "lsd wrapper exceeds its single launch operation: " + forbidden)
 
     for marker in (
-        'strcmp(process, "lsd")',
+        'strncmp(process, "lsd", 3)',
         '"_LSInstallProgressService"',
         '"performJournalRecovery"',
         "dispatch_get_global_queue(QOS_CLASS_UTILITY, 0)",
@@ -53,7 +53,7 @@ def main() -> int:
     ):
         require(forbidden not in shim,
                 "recovery shim exceeds its single operation: " + forbidden)
-    print("H519 lsd wrapper and recovery-async gate: PASS")
+    print("H520 lsd wrapper and recovery-async gate: PASS")
     return 0
 
 

@@ -37,7 +37,7 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H503",
+        "build=H504",
         "if (sample == 0) {",
         "inventory_springboard_classes();",
         "probe_nonblocking_shared_instances();",
@@ -63,6 +63,8 @@ def main():
         '"preservesFlip"',
         '"applicationState"',
         '"activationState"',
+        "DISPATCH_SOURCE_TYPE_TIMER",
+        "480LL * NSEC_PER_SEC",
         '"sharedInstanceIfExists"',
         "class_copyMethodList(object_getClass(cls), &methodCount)",
         'line("sbinventory begin")',
@@ -107,7 +109,7 @@ def main():
     ):
         require(forbidden not in bootstrap,
                 f"H483 wrapper retained one-shot behavior: {forbidden}")
-    print("H503 SpringBoard observer gate: PASS")
+    print("H504 SpringBoard observer gate: PASS")
 
 
 if __name__ == "__main__":

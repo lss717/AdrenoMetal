@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H503 read-only SpringBoard scene observer. It is injected through the
+// H504 read-only SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -653,12 +653,23 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
     if (!process || strncmp(process, "SpringBoard", 11)) return;
-    line("observer load process=%s pid=%d build=H503", process, getpid());
-    const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0, 480.0 };
+    line("observer load process=%s pid=%d build=H504", process, getpid());
+    const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),
                        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             snapshot("springboard", index);
         });
     }
+    dispatch_source_t timer = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    dispatch_source_set_timer(timer,
+                              dispatch_time(DISPATCH_TIME_NOW, 480LL * NSEC_PER_SEC),
+                              DISPATCH_TIME_FOREVER, NSEC_PER_SEC);
+    dispatch_source_set_event_handler(timer, ^{
+        snapshot("springboard", 5);
+        dispatch_source_cancel(timer);
+    });
+    dispatch_resume(timer);
 }

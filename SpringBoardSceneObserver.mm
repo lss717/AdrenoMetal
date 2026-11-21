@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H509 SpringBoard scene observer. It is injected through the
+// H510 SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -49,6 +49,7 @@ static unsigned gLayerCommitEventCount;
 static unsigned gWindowCommitCount[2];
 static unsigned gWindowVisibilityEventCount;
 static bool gVisibilitySnapshotScheduled;
+static bool gRootVisibilityRequested;
 
 static void snapshot(const char *phase, unsigned sample);
 static void schedule_post_visibility_snapshot(void);
@@ -656,6 +657,30 @@ static void log_root_window_state(const char *phase)
     }
 }
 
+static void request_root_window_visible(void)
+{
+    Class applicationClass = NSClassFromString(@"UIApplication");
+    id application = applicationClass
+        ? ((id (*)(id, SEL)) objc_msgSend)(
+              (id) applicationClass, @selector(sharedApplication))
+        : nil;
+    id windows = normalized_collection(read_object(application, "windows"));
+    const unsigned long long count = collection_count(windows);
+    log_root_window_state("h510_before");
+    for (unsigned long long index = 0; index < count && index < 8; ++index) {
+        id window = collection_object_at(windows, index);
+        const char *name = class_name_or_nil(window);
+        if (!strstr(name, "RootSceneWindow")) continue;
+        line("event=h510_root_visibility_request pid=%d window=%p class=%s",
+             getpid(), (__bridge void *) window, name);
+        if ([window respondsToSelector:@selector(makeKeyAndVisible)])
+            ((void (*)(id, SEL)) objc_msgSend)(window,
+                                               @selector(makeKeyAndVisible));
+        break;
+    }
+    log_root_window_state("h510_after");
+}
+
 static void schedule_post_visibility_snapshot(void)
 {
     if (gVisibilitySnapshotScheduled) return;
@@ -962,6 +987,12 @@ static void snapshot(const char *phase, unsigned sample)
     line("sample=%u appState=%llu hasAppState=%d",
          sample, applicationState, hasApplicationState ? 1 : 0);
     snapshot_windows("application", application, sample);
+    if (sample == 4 && !gRootVisibilityRequested) {
+        gRootVisibilityRequested = true;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            request_root_window_visible();
+        });
+    }
 }
 
 static void *sampling_worker(void *)
@@ -983,7 +1014,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
-    line("observer load process=%s pid=%d build=H509", process, getpid());
+    line("observer load process=%s pid=%d build=H510", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),

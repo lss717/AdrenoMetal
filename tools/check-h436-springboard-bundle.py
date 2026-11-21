@@ -20,8 +20,8 @@ def main():
     observer = OBSERVER.read_text(encoding="utf-8")
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
 
-    require('caller("builder", "build", "H509");' in trace,
-            "H509 trace marker missing")
+    require('caller("builder", "build", "H510");' in trace,
+            "H510 trace marker missing")
     for marker in (
         "state->owner_status = pid_for_task(",
         'proc_name(state->owner_pid, state->owner_name',
@@ -43,7 +43,7 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H509",
+        "build=H510",
         "if (sample == 0) {",
         "inventory_springboard_classes();",
         "probe_nonblocking_shared_instances();",
@@ -86,6 +86,7 @@ def main():
         '"uiwindow_scene_visible"',
         'event=root_visibility_state',
         'event=root_visibility_window',
+        'event=h510_root_visibility_request',
         'schedule_post_visibility_snapshot();',
         'snapshot("springboard", 6);',
         'if (sample == 4 || sample == 5 || sample == 6)',
@@ -133,7 +134,7 @@ def main():
     ):
         require(forbidden not in bootstrap,
                 f"H483 wrapper retained one-shot behavior: {forbidden}")
-    print("H509 SpringBoard observer gate: PASS")
+    print("H510 SpringBoard observer gate: PASS")
 
 
 if __name__ == "__main__":

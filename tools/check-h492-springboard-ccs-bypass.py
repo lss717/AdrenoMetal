@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SHIM = ROOT / "SpringBoardCCSBypass.mm"
+BUILD = ROOT.parents[1] / "scripts/build-h436-springboard-bundle.py"
 
 
 def require(condition: bool, message: str) -> None:
@@ -33,7 +34,16 @@ def main() -> int:
         "CCSModuleRepository sharedInstance",
     ):
         require(forbidden not in text, "bypass exceeds its single operation: " + forbidden)
-    print("H492 SpringBoard CCS bypass gate: PASS")
+    build = BUILD.read_text(encoding="utf-8")
+    require(
+        "drivers/NativeMetal/SpringBoardCCSBypass.mm" in build,
+        "SpringBoard bundle build does not link the CCS bypass",
+    )
+    require(
+        'b"H492_CCS"' in build,
+        "SpringBoard bundle build does not verify the final dylib marker",
+    )
+    print("H492 SpringBoard CCS bypass gate including final-dylib guard: PASS")
     return 0
 
 

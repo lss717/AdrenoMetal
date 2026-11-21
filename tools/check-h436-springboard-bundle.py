@@ -68,7 +68,7 @@ def main():
     ):
         require(forbidden not in bootstrap,
                 f"H483 wrapper retained one-shot behavior: {forbidden}")
-    print("H483 SpringBoard bundle wrapper gate: PASS")
+    print("H487 SpringBoard observer gate: PASS")
 
 
 if __name__ == "__main__":

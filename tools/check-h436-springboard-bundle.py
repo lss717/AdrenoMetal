@@ -20,8 +20,8 @@ def main():
     observer = OBSERVER.read_text(encoding="utf-8")
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
 
-    require('caller("builder", "build", "H511");' in trace,
-            "H511 trace marker missing")
+    require('caller("builder", "build", "H512");' in trace,
+            "H512 trace marker missing")
     for marker in (
         "state->owner_status = pid_for_task(",
         'proc_name(state->owner_pid, state->owner_name',
@@ -43,7 +43,7 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H511",
+        "build=H512",
         "if (sample == 0) {",
         "inventory_springboard_classes();",
         "probe_nonblocking_shared_instances();",
@@ -86,11 +86,14 @@ def main():
         '"uiwindow_scene_visible"',
         'event=root_visibility_state',
         'event=root_visibility_window',
-        'event=h511_runloop_enqueue_begin',
-        'event=h511_runloop_enqueued',
-        'event=h511_main_block_enter',
-        'event=h511_main_block_exit',
-        'event=h511_root_visibility_request',
+        'event=h512_app_monitor_start',
+        'event=h512_app_ready',
+        'event=h512_app_wait',
+        'event=h512_runloop_enqueue_begin',
+        'event=h512_runloop_enqueued',
+        'event=h512_main_block_enter',
+        'event=h512_main_block_exit',
+        'event=h512_root_visibility_request',
         "CFRunLoopPerformBlock(mainRunLoop, kCFRunLoopCommonModes",
         "CFRunLoopWakeUp(mainRunLoop)",
         'schedule_post_visibility_snapshot();',
@@ -140,7 +143,7 @@ def main():
     ):
         require(forbidden not in bootstrap,
                 f"H483 wrapper retained one-shot behavior: {forbidden}")
-    print("H511 SpringBoard observer gate: PASS")
+    print("H512 SpringBoard observer gate: PASS")
 
 
 if __name__ == "__main__":

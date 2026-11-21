@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H508 SpringBoard scene observer. It is injected through the
+// H509 SpringBoard scene observer. It is injected through the
 // owner-provided LaunchDaemon overlay and logs through the A540 ABI. The
 // observer only runs in SpringBoard; inherited DYLD_INSERT_LIBRARIES values in
 // child processes are ignored.
@@ -48,7 +48,10 @@ static unsigned gWindowContentsEventCount;
 static unsigned gLayerCommitEventCount;
 static unsigned gWindowCommitCount[2];
 static unsigned gWindowVisibilityEventCount;
-static bool gRootActivationRequested;
+static bool gVisibilitySnapshotScheduled;
+
+static void snapshot(const char *phase, unsigned sample);
+static void schedule_post_visibility_snapshot(void);
 
 extern "C" {
 int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
@@ -508,9 +511,11 @@ static void trace_layer_host_visible(id self, SEL selector, BOOL visible)
         self, selector, visible);
     unsigned long long contextId = 0;
     const bool hasContextId = read_integer(self, "contextId", &contextId);
+    const char *kind = window_kind_for_layer(self);
     line("event=ca_host_visible pid=%d visible=%d layer=%p host=0x%x hasContextId=%d window=%s",
          getpid(), visible ? 1 : 0, (__bridge void *) self, (unsigned) contextId,
-         hasContextId ? 1 : 0, window_kind_for_layer(self));
+         hasContextId ? 1 : 0, kind);
+    if (visible && !strcmp(kind, "root")) schedule_post_visibility_snapshot();
 }
 
 static void trace_context_set_layer(id self, SEL selector, id layer)
@@ -587,12 +592,14 @@ static void log_window_visibility(const char *event, id window, BOOL visible)
     const bool hasVisible = read_integer(window, "_isVisible", &windowVisible);
     id layer = read_object(window, "layer");
     id windowScene = read_object(window, "windowScene");
+    const char *kind = window_kind_for_layer(layer);
     line("event=%s window=%s pid=%d object=%p visible=%d hidden=%llu hasHidden=%d _isVisible=%llu hasVisible=%d layer=%.24s scene=%.24s",
-         event, window_kind_for_layer(layer), getpid(), (__bridge void *) window,
+         event, kind, getpid(), (__bridge void *) window,
          visible ? 1 : 0, hidden, hasHidden ? 1 : 0, windowVisible,
          hasVisible ? 1 : 0, class_name_or_nil(layer),
          class_name_or_nil(windowScene));
-    if (layer) log_layer_event(event, window_kind_for_layer(layer), layer);
+    if (layer) log_layer_event(event, kind, layer);
+    if (visible && !strcmp(kind, "root")) schedule_post_visibility_snapshot();
 }
 
 static void trace_window_set_hidden(id self, SEL selector,
@@ -625,8 +632,8 @@ static void log_root_window_state(const char *phase)
         : nil;
     id windows = normalized_collection(read_object(application, "windows"));
     const unsigned long long count = collection_count(windows);
-    line("event=root_activation_state phase=%s pid=%d windows=%llu requested=%d",
-         phase, getpid(), count, gRootActivationRequested ? 1 : 0);
+    line("event=root_visibility_state phase=%s pid=%d windows=%llu scheduled=%d",
+         phase, getpid(), count, gVisibilitySnapshotScheduled ? 1 : 0);
     for (unsigned long long index = 0; index < count && index < 8; ++index) {
         id window = collection_object_at(windows, index);
         const char *name = class_name_or_nil(window);
@@ -641,7 +648,7 @@ static void log_root_window_state(const char *phase)
         unsigned long long activation = 0;
         const bool hasActivation = read_integer(
             windowScene, "activationState", &activation);
-        line("event=root_activation_window phase=%s window=%s object=%p hidden=%llu hasHidden=%d _isVisible=%llu hasVisible=%d layer=%.24s scene=%.24s activation=%llu hasActivation=%d",
+        line("event=root_visibility_window phase=%s window=%s object=%p hidden=%llu hasHidden=%d _isVisible=%llu hasVisible=%d layer=%.24s scene=%.24s activation=%llu hasActivation=%d",
              phase, name, (__bridge void *) window, hidden, hasHidden ? 1 : 0,
              visible, hasVisible ? 1 : 0, class_name_or_nil(layer),
              class_name_or_nil(windowScene), activation,
@@ -649,32 +656,17 @@ static void log_root_window_state(const char *phase)
     }
 }
 
-static void activate_root_scene_window(void)
+static void schedule_post_visibility_snapshot(void)
 {
-    Class applicationClass = NSClassFromString(@"UIApplication");
-    id application = applicationClass
-        ? ((id (*)(id, SEL)) objc_msgSend)(
-              (id) applicationClass, @selector(sharedApplication))
-        : nil;
-    id windows = normalized_collection(read_object(application, "windows"));
-    const unsigned long long count = collection_count(windows);
-    log_root_window_state("before");
-    for (unsigned long long index = 0; index < count && index < 8; ++index) {
-        id window = collection_object_at(windows, index);
-        const char *name = class_name_or_nil(window);
-        if (!strstr(name, "RootSceneWindow")) continue;
-        line("event=root_activation_request pid=%d window=%p class=%s",
-             getpid(), (__bridge void *) window, name);
-        if ([window respondsToSelector:@selector(makeKeyAndVisible)])
-            ((void (*)(id, SEL)) objc_msgSend)(window,
-                                               @selector(makeKeyAndVisible));
-        break;
-    }
-    log_root_window_state("after");
+    if (gVisibilitySnapshotScheduled) return;
+    gVisibilitySnapshotScheduled = true;
     dispatch_after(
-        dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC),
+        dispatch_time(DISPATCH_TIME_NOW, 2LL * NSEC_PER_SEC),
         dispatch_get_main_queue(), ^{
-            log_root_window_state("post10");
+            log_root_window_state("post_visibility");
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                snapshot("springboard", 6);
+            });
         });
 }
 
@@ -822,7 +814,7 @@ static void snapshot_window(const char *scope, unsigned index, id window,
              hasActivation ? 1 : 0, orientation, hasOrientation ? 1 : 0);
     }
     if (layer) log_object_field("window", index, layer, "contents");
-    if (sample == 4 || sample == 5)
+    if (sample == 4 || sample == 5 || sample == 6)
         snapshot_window_views(scope, index, window, rootViewController);
 }
 
@@ -858,7 +850,7 @@ static void snapshot(const char *phase, unsigned sample)
         inventory_springboard_classes();
         probe_nonblocking_shared_instances();
     }
-    if (sample == 4 || sample == 5) {
+    if (sample == 4 || sample == 5 || sample == 6) {
         gViewBudget = 96;
         gLayerBudget = 240;
         gHostContextCount = 0;
@@ -970,12 +962,6 @@ static void snapshot(const char *phase, unsigned sample)
     line("sample=%u appState=%llu hasAppState=%d",
          sample, applicationState, hasApplicationState ? 1 : 0);
     snapshot_windows("application", application, sample);
-    if (sample == 4 && !gRootActivationRequested) {
-        gRootActivationRequested = true;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            activate_root_scene_window();
-        });
-    }
 }
 
 static void *sampling_worker(void *)
@@ -997,7 +983,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
-    line("observer load process=%s pid=%d build=H508", process, getpid());
+    line("observer load process=%s pid=%d build=H509", process, getpid());
     const double delays[] = { 5.0, 30.0, 90.0, 180.0, 300.0 };
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delays[index] * 1e9)),

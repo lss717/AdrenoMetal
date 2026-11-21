@@ -51,7 +51,7 @@ static unsigned gWindowVisibilityEventCount;
 static bool gVisibilitySnapshotScheduled;
 static bool gRootVisibilityRequested;
 static bool gApplicationReadinessWorkerStarted;
-static id (*gApplicationSharedApplication)(id, SEL);
+static IMP gApplicationSharedApplication;
 static id gDidFinishLaunchingObserver;
 static id gWillEnterForegroundObserver;
 static id gDidBecomeActiveObserver;
@@ -66,7 +66,7 @@ static id trace_application_shared_application(id self, SEL selector)
     line("event=h514_shared_application_enter receiver=%s thread=%p main=%d",
          class_name_or_nil(self), (void *) pthread_self(), pthread_main_np());
     id application = gApplicationSharedApplication
-        ? gApplicationSharedApplication(self, selector) : nil;
+        ? ((id (*)(id, SEL)) gApplicationSharedApplication)(self, selector) : nil;
     line("event=h514_shared_application_return app=%p class=%s",
          (__bridge void *) application, class_name_or_nil(application));
     return application;
@@ -843,7 +843,7 @@ static void install_application_notifications(void)
         addObserverForName:@"UIApplicationDidFinishLaunchingNotification"
                     object:nil
                      queue:nil
-                usingBlock:^(NSNotification *notification) {
+                usingBlock:^(NSNotification * __unused notification) {
         line("event=h514_application_notification name=did_finish_launching pid=%d thread=%p main=%d",
              getpid(), (void *) pthread_self(), pthread_main_np());
     }];
@@ -851,7 +851,7 @@ static void install_application_notifications(void)
         addObserverForName:@"UIApplicationWillEnterForegroundNotification"
                     object:nil
                      queue:nil
-                usingBlock:^(NSNotification *notification) {
+                usingBlock:^(NSNotification * __unused notification) {
         line("event=h514_application_notification name=will_enter_foreground pid=%d thread=%p main=%d",
              getpid(), (void *) pthread_self(), pthread_main_np());
     }];
@@ -859,7 +859,7 @@ static void install_application_notifications(void)
         addObserverForName:@"UIApplicationDidBecomeActiveNotification"
                     object:nil
                      queue:nil
-                usingBlock:^(NSNotification *notification) {
+                usingBlock:^(NSNotification * __unused notification) {
         line("event=h514_application_notification name=did_become_active pid=%d thread=%p main=%d",
              getpid(), (void *) pthread_self(), pthread_main_np());
     }];

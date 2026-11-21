@@ -31,7 +31,7 @@ def main():
         "UIApplication",
         "connectedScenes",
         "CADisplay",
-        "build=H481",
+        "build=H487",
     ):
         require(marker in observer, f"H436 observer missing: {marker}")
     for forbidden in (

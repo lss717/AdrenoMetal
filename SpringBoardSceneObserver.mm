@@ -53,8 +53,13 @@ static unsigned gWindowContentsEventCount;
 static unsigned gLayerCommitEventCount;
 static unsigned gWindowCommitCount[2];
 static unsigned gWindowVisibilityEventCount;
+static unsigned gPostDidFinishContentsEventCount;
+static unsigned gPostDidFinishCommitEventCount;
+static unsigned gPostDidFinishTransactionEventCount;
 static bool gVisibilitySnapshotScheduled;
 static bool gApplicationSceneProbeStarted;
+static bool gDidFinishReturned;
+static bool gPostDidFinishSnapshotStarted;
 static IMP gApplicationSharedApplication;
 static IMP gSpringBoardApplicationDidFinishLaunching;
 static IMP gSpringBoardStartSystemStatusServer;
@@ -87,6 +92,7 @@ static const char *class_name_or_nil(id object);
 static void copy_utf8(id value, char *out, size_t size);
 static void schedule_application_scene_probe(unsigned tick);
 static void log_application_scene_state(const char *phase);
+static void snapshot_windows(const char *scope, id owner, unsigned sample);
 
 static BOOL trace_by_setup_assistant_needs_to_run(void)
 {
@@ -139,8 +145,30 @@ static void trace_springboard_application_did_finish(
         self, selector, notification);
     line("event=h541_did_finish_return pid=%d thread=%p main=%d",
          getpid(), (void *) pthread_self(), pthread_main_np());
+    gDidFinishReturned = true;
     schedule_application_scene_probe(0);
     log_application_scene_state("h542_after_did_finish");
+
+    if (!gPostDidFinishSnapshotStarted) {
+        gPostDidFinishSnapshotStarted = true;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5LL * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{
+            Class applicationClass = NSClassFromString(@"UIApplication");
+            id application = applicationClass
+                ? ((id (*)(id, SEL)) objc_msgSend)(
+                      (id) applicationClass, @selector(sharedApplication))
+                : nil;
+            line("event=h556_post_did_finish_snapshot_enter pid=%d thread=%p main=%d app=%d",
+                 getpid(), (void *) pthread_self(), pthread_main_np(),
+                 application ? 1 : 0);
+            gViewBudget = 48;
+            gLayerBudget = 160;
+            gHostContextCount = 0;
+            snapshot_windows("h556_post_did_finish", application, 5);
+            log_application_scene_state("h556_post_did_finish");
+            line("event=h556_post_did_finish_snapshot_exit pid=%d", getpid());
+        });
+    }
 }
 
 static void trace_springboard_start_system_status_server(id self, SEL selector)
@@ -933,8 +961,14 @@ static void trace_layer_set_contents(id self, SEL selector, id contents)
 {
     ((void (*)(id, SEL, id)) gLayerSetContents)(self, selector, contents);
     const char *kind = window_kind_for_layer(self);
-    if (!strcmp(kind, "-") || gWindowContentsEventCount >= 12) return;
-    ++gWindowContentsEventCount;
+    if (!strcmp(kind, "-")) return;
+    if (gDidFinishReturned) {
+        if (gPostDidFinishContentsEventCount >= 16) return;
+        ++gPostDidFinishContentsEventCount;
+    } else {
+        if (gWindowContentsEventCount >= 12) return;
+        ++gWindowContentsEventCount;
+    }
     id resolved = read_object(self, "contents");
     line("event=ca_layer_set_contents window=%s pid=%d layer=%p class=%s input=%.24s contents=%d resolved=%.24s",
          kind, getpid(), (__bridge void *) self, class_name_or_nil(self),
@@ -948,22 +982,37 @@ static void trace_layer_did_commit(id self, SEL selector, id layer)
     const char *kind = window_kind_for_layer(self);
     const unsigned kindIndex = window_kind_index(kind);
     const bool target = kindIndex < 2;
-    if (target && gWindowCommitCount[kindIndex] < 12)
-        ++gWindowCommitCount[kindIndex];
-    else if (!target && gLayerCommitEventCount >= 24)
-        return;
-    ++gLayerCommitEventCount;
+    if (gDidFinishReturned) {
+        if (gPostDidFinishCommitEventCount >= 16) return;
+        ++gPostDidFinishCommitEventCount;
+    } else {
+        if (target && gWindowCommitCount[kindIndex] < 12)
+            ++gWindowCommitCount[kindIndex];
+        else if (!target && gLayerCommitEventCount >= 24)
+            return;
+        ++gLayerCommitEventCount;
+    }
     log_layer_event("ca_layer_commit", kind, self);
 }
 
 static void trace_transaction_flush(id self, SEL selector)
 {
     ((void (*)(id, SEL)) gTransactionFlushAsRunLoopObserver)(self, selector);
-    if (gTransactionEventCount >= 12) return;
-    ++gTransactionEventCount;
-    line("event=ca_transaction_flush pid=%d transaction=%p thread=%p contexts=%u hostEvents=%u layerCommits=%u",
-         getpid(), (__bridge void *) self, (void *) pthread_self(), gContextLayerEventCount,
-         gHostContextEventCount, gLayerCommitEventCount);
+    if (gDidFinishReturned) {
+        if (gPostDidFinishTransactionEventCount >= 16) return;
+        ++gPostDidFinishTransactionEventCount;
+        line("event=h556_post_transaction_flush pid=%d transaction=%p thread=%p main=%d contentsEvents=%u commitEvents=%u",
+             getpid(), (__bridge void *) self, (void *) pthread_self(),
+             pthread_main_np(), gPostDidFinishContentsEventCount,
+             gPostDidFinishCommitEventCount);
+    } else {
+        if (gTransactionEventCount >= 12) return;
+        ++gTransactionEventCount;
+        line("event=ca_transaction_flush pid=%d transaction=%p thread=%p contexts=%u hostEvents=%u layerCommits=%u",
+             getpid(), (__bridge void *) self, (void *) pthread_self(),
+             gContextLayerEventCount, gHostContextEventCount,
+             gLayerCommitEventCount);
+    }
 }
 
 static void log_window_visibility(const char *event, id window, BOOL visible)
@@ -1038,6 +1087,14 @@ static void log_root_window_state(const char *phase)
              visible, hasVisible ? 1 : 0, class_name_or_nil(layer),
              class_name_or_nil(windowScene), activation,
              hasActivation ? 1 : 0);
+        id contents = read_object(layer, "contents");
+        unsigned long long hostContextId = 0;
+        const bool hasHostContextId = read_integer(
+            layer, "contextId", &hostContextId);
+        line("event=root_visibility_layer phase=%s window=%s layer=%p class=%.28s contents=%d contentsClass=%.20s contextId=0x%x hasContextId=%d",
+             phase, name, (__bridge void *) layer, class_name_or_nil(layer),
+             contents ? 1 : 0, class_name_or_nil(contents),
+             (unsigned) hostContextId, hasHostContextId ? 1 : 0);
     }
 }
 
@@ -1071,6 +1128,14 @@ static void log_application_scene_state(const char *phase)
              visible, hasVisible ? 1 : 0, class_name_or_nil(layer),
              class_name_or_nil(windowScene), activation,
              hasActivation ? 1 : 0);
+        id contents = read_object(layer, "contents");
+        unsigned long long hostContextId = 0;
+        const bool hasHostContextId = read_integer(
+            layer, "contextId", &hostContextId);
+        line("event=h541_window_layer phase=%s index=%llu layer=%p class=%.28s contents=%d contentsClass=%.20s contextId=0x%x hasContextId=%d",
+             phase, index, (__bridge void *) layer, class_name_or_nil(layer),
+             contents ? 1 : 0, class_name_or_nil(contents),
+             (unsigned) hostContextId, hasHostContextId ? 1 : 0);
     }
 
     for (unsigned long long index = 0; index < sceneCount && index < 8; ++index) {
@@ -1577,7 +1642,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H555", process, getpid());
+    line("observer load process=%s pid=%d build=H556", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

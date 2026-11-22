@@ -55,6 +55,7 @@ static IMP gApplicationSharedApplication;
 static IMP gSpringBoardApplicationDidFinishLaunching;
 static IMP gSpringBoardStartSystemStatusServer;
 static IMP gMCProfileConnectionWaitForMigration;
+static IMP gSpringBoardSetupManagerInit;
 static id gObservedApplication;
 static id gDidFinishLaunchingObserver;
 static id gWillEnterForegroundObserver;
@@ -113,6 +114,15 @@ static void trace_mc_wait_for_migration(
          completion ? 1 : 0);
     line("event=h543_mc_wait_bypass_return pid=%d thread=%p main=%d",
          getpid(), (void *) pthread_self(), pthread_main_np());
+}
+
+static id trace_springboard_setup_manager_init(id self, SEL selector)
+{
+    (void) selector;
+    line("event=h544_setup_manager_init_bypass pid=%d thread=%p main=%d object=%p",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) self);
+    return self;
 }
 
 extern "C" {
@@ -865,13 +875,17 @@ static void install_ca_event_hooks(void)
         "waitForMigrationIncludingPostRestoreMigration:waitUntilCompleted:completion:",
         (IMP) trace_mc_wait_for_migration,
         &gMCProfileConnectionWaitForMigration);
-    line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contextRemote=%d contents=%d commit=%d flush=%d windowHidden=%d windowMakeVisible=%d windowSceneVisible=%d applicationShared=%d springboardStatusServerSkipped=%d springboardDidFinish=%d mcWaitForMigrationSkipped=%d",
+    Class setupManager = NSClassFromString(@"SBSetupManager");
+    const bool setupManagerInitSkipped = install_instance_hook(
+        setupManager, "init", (IMP) trace_springboard_setup_manager_init,
+        &gSpringBoardSetupManagerInit);
+    line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contextRemote=%d contents=%d commit=%d flush=%d windowHidden=%d windowMakeVisible=%d windowSceneVisible=%d applicationShared=%d springboardStatusServerSkipped=%d springboardDidFinish=%d mcWaitForMigrationSkipped=%d setupManagerInitSkipped=%d",
          getpid(), hostId ? 1 : 0, hostVisible ? 1 : 0, contextLayer ? 1 : 0,
          contextRemote ? 1 : 0, contents ? 1 : 0, commit ? 1 : 0,
          flush ? 1 : 0, windowHidden ? 1 : 0, windowMakeVisible ? 1 : 0,
          windowSceneVisible ? 1 : 0, applicationShared ? 1 : 0,
          springboardStatusServerSkipped ? 1 : 0, springboardDidFinish ? 1 : 0,
-         mcWaitForMigrationSkipped ? 1 : 0);
+         mcWaitForMigrationSkipped ? 1 : 0, setupManagerInitSkipped ? 1 : 0);
 }
 
 static void install_application_notifications(void)
@@ -1166,7 +1180,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
-    line("observer load process=%s pid=%d build=H543", process, getpid());
+    line("observer load process=%s pid=%d build=H544", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

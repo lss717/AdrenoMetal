@@ -116,6 +116,9 @@ static void line_reserved(const char *format, ...)
     __attribute__((format(printf, 1, 2)));
 static const char *class_name_or_nil(id object);
 static void copy_utf8(id value, char *out, size_t size);
+static const char *instance_encoding(id object, const char *name);
+static id read_object(id object, const char *name);
+static bool read_integer(id object, const char *name, unsigned long long *value);
 static void trace_uncaught_exception(NSException *exception);
 static void trace_cxx_terminate();
 static void rearm_exception_reporters(const char *site);
@@ -297,19 +300,29 @@ static id trace_bsservice_proxy_create(
         gBSServiceProxyCreateOriginal)(self, selector, protocol, remoteClass, name);
 }
 
-static BOOL trace_bsxpc_message_send_synchronously(
+static id trace_bsxpc_message_send_synchronously(
     id self, SEL selector, id *error)
 {
-    line("event=h585_bs_message_send_sync_enter pid=%d main=%d object=%p class=%s",
+    const char *encoding = instance_encoding(self, "sendSynchronouslyWithError:");
+    id selectorName = read_object(self, "selectorName");
+    unsigned long long messageID = 0;
+    unsigned long long expectsReply = 0;
+    char selectorText[128];
+    copy_utf8(selectorName, selectorText, sizeof selectorText);
+    read_integer(self, "messageID", &messageID);
+    read_integer(self, "expectsReply", &expectsReply);
+    line("event=h585_bs_message_send_sync_enter pid=%d main=%d object=%p class=%s encoding=%s selector=%.112s msgid=%llu reply=%llu",
          getpid(), pthread_main_np(), (__bridge void *) self,
-         class_name_or_nil(self));
-    BOOL result = ((BOOL (*)(id, SEL, id *))
+         class_name_or_nil(self), encoding ? encoding : "-",
+         selectorText, messageID, expectsReply);
+    id result = ((id (*)(id, SEL, id *))
         gBSXPCServiceMessageSendSynchronouslyOriginal)(self, selector, error);
     id errorObject = error ? *error : nil;
     char reason[128];
     copy_utf8(errorObject, reason, sizeof reason);
-    line("event=h585_bs_message_send_sync_return pid=%d main=%d result=%d error=%d class=%s reason=%.112s",
-         getpid(), pthread_main_np(), result ? 1 : 0, errorObject ? 1 : 0,
+    line("event=h585_bs_message_send_sync_return pid=%d main=%d result=%p error=%d class=%s reason=%.112s",
+         getpid(), pthread_main_np(), (__bridge void *) result,
+         errorObject ? 1 : 0,
          class_name_or_nil(errorObject), reason);
     return result;
 }
@@ -2158,7 +2171,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H585", process, getpid());
+    line("observer load process=%s pid=%d build=H586", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

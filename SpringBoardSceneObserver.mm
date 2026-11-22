@@ -69,6 +69,10 @@ static IMP gStatusDomainDataChangeLogInitOriginal;
 static IMP gTelephonyManagerSharedOriginal;
 static IMP gTelephonyManagerSharedCreatingOriginal;
 static IMP gTelephonyManagerInitOriginal;
+static IMP gApplicationControllerInitOriginal;
+static IMP gApplicationLibraryInstalledApplicationOriginal;
+static IMP gApplicationLibraryInstalledApplicationsOriginal;
+static IMP gApplicationLibraryAllInstalledApplicationsOriginal;
 static id gObservedApplication;
 static id gDidFinishLaunchingObserver;
 static id gWillEnterForegroundObserver;
@@ -78,6 +82,7 @@ static bool gSetupReturnSamplerStarted;
 static void snapshot(const char *phase, unsigned sample) __attribute__((unused));
 static void line(const char *format, ...) __attribute__((format(printf, 1, 2)));
 static const char *class_name_or_nil(id object);
+static void copy_utf8(id value, char *out, size_t size);
 static void schedule_application_scene_probe(unsigned tick);
 static void log_application_scene_state(const char *phase);
 
@@ -171,7 +176,7 @@ static BOOL trace_mc_should_show_cloud_configuration_ui(id self, SEL selector)
 static void *sample_main_thread_after_setup_return(void *context)
 {
     mach_port_t thread = (mach_port_t)(uintptr_t)context;
-    static const unsigned delays[] = { 1, 2, 4, 7 };
+    static const unsigned delays[] = { 1, 2, 4, 7, 15, 30, 60, 120 };
     unsigned previous = 0;
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         usleep((useconds_t)(delays[index] - previous) * 1000000);
@@ -327,6 +332,63 @@ static id trace_telephony_manager_init(id self, SEL selector)
          getpid(), (void *) pthread_self(), pthread_main_np(),
          (__bridge void *) manager);
     return manager;
+}
+
+static id trace_application_controller_init(id self, SEL selector)
+{
+    line("event=h553_application_controller_init_enter pid=%d thread=%p main=%d object=%p",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) self);
+    id controller = ((id (*)(id, SEL)) gApplicationControllerInitOriginal)(
+        self, selector);
+    line("event=h553_application_controller_init_return pid=%d thread=%p main=%d object=%p",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) controller);
+    return controller;
+}
+
+static id trace_application_library_installed_application(
+    id self, SEL selector, id bundleIdentifier)
+{
+    char identifier[128];
+    copy_utf8(bundleIdentifier, identifier, sizeof identifier);
+    line("event=h553_application_library_installed_application_enter pid=%d thread=%p main=%d bundle=%.112s",
+         getpid(), (void *) pthread_self(), pthread_main_np(), identifier);
+    id application = ((id (*)(id, SEL, id))
+        gApplicationLibraryInstalledApplicationOriginal)(
+            self, selector, bundleIdentifier);
+    line("event=h553_application_library_installed_application_return pid=%d thread=%p main=%d object=%p class=%s",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) application, class_name_or_nil(application));
+    return application;
+}
+
+static id trace_application_library_installed_applications(
+    id self, SEL selector, id bundleIdentifier)
+{
+    char identifier[128];
+    copy_utf8(bundleIdentifier, identifier, sizeof identifier);
+    line("event=h553_application_library_installed_applications_enter pid=%d thread=%p main=%d bundle=%.112s",
+         getpid(), (void *) pthread_self(), pthread_main_np(), identifier);
+    id applications = ((id (*)(id, SEL, id))
+        gApplicationLibraryInstalledApplicationsOriginal)(
+            self, selector, bundleIdentifier);
+    line("event=h553_application_library_installed_applications_return pid=%d thread=%p main=%d object=%p class=%s",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) applications, class_name_or_nil(applications));
+    return applications;
+}
+
+static id trace_application_library_all_installed_applications(id self, SEL selector)
+{
+    line("event=h553_application_library_all_installed_enter pid=%d thread=%p main=%d",
+         getpid(), (void *) pthread_self(), pthread_main_np());
+    id applications = ((id (*)(id, SEL))
+        gApplicationLibraryAllInstalledApplicationsOriginal)(self, selector);
+    line("event=h553_application_library_all_installed_return pid=%d thread=%p main=%d object=%p class=%s",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) applications, class_name_or_nil(applications));
+    return applications;
 }
 
 extern "C" {
@@ -1138,6 +1200,23 @@ static void install_ca_event_hooks(void)
     const bool telephonyInitObserved = install_instance_hook(
         telephonyManager, "init", (IMP) trace_telephony_manager_init,
         &gTelephonyManagerInitOriginal);
+    Class applicationController = NSClassFromString(@"SBApplicationController");
+    const bool applicationControllerInitObserved = install_instance_hook(
+        applicationController, "init", (IMP) trace_application_controller_init,
+        &gApplicationControllerInitOriginal);
+    Class applicationLibrary = NSClassFromString(@"FBSApplicationLibrary");
+    const bool installedApplicationObserved = install_instance_hook(
+        applicationLibrary, "installedApplicationWithBundleIdentifier:",
+        (IMP) trace_application_library_installed_application,
+        &gApplicationLibraryInstalledApplicationOriginal);
+    const bool installedApplicationsObserved = install_instance_hook(
+        applicationLibrary, "installedApplicationsForBundleIdentifier:",
+        (IMP) trace_application_library_installed_applications,
+        &gApplicationLibraryInstalledApplicationsOriginal);
+    const bool allInstalledApplicationsObserved = install_instance_hook(
+        applicationLibrary, "allInstalledApplications",
+        (IMP) trace_application_library_all_installed_applications,
+        &gApplicationLibraryAllInstalledApplicationsOriginal);
     line("h550_hud_hooks pid=%d setupHUD=%d soundShared=%d soundInit=%d ringerInit=%d",
          getpid(), setupHUDObserved ? 1 : 0, soundSharedObserved ? 1 : 0,
          soundInitObserved ? 1 : 0, ringerInitObserved ? 1 : 0);
@@ -1147,6 +1226,11 @@ static void install_ca_event_hooks(void)
          getpid(), telephonySharedObserved ? 1 : 0,
          telephonySharedCreatingObserved ? 1 : 0,
          telephonyInitObserved ? 1 : 0);
+    line("h553_application_hooks pid=%d controllerInit=%d installedApp=%d installedApps=%d allInstalled=%d",
+         getpid(), applicationControllerInitObserved ? 1 : 0,
+         installedApplicationObserved ? 1 : 0,
+         installedApplicationsObserved ? 1 : 0,
+         allInstalledApplicationsObserved ? 1 : 0);
     line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contextRemote=%d contents=%d commit=%d flush=%d windowHidden=%d windowMakeVisible=%d windowSceneVisible=%d applicationShared=%d springboardStatusServerObserved=%d springboardDidFinish=%d mcWaitForMigrationSkipped=%d mcShouldShowCloudConfigurationUISkipped=%d setupManagerInitObserved=%d",
          getpid(), hostId ? 1 : 0, hostVisible ? 1 : 0, contextLayer ? 1 : 0,
          contextRemote ? 1 : 0, contents ? 1 : 0, commit ? 1 : 0,
@@ -1455,7 +1539,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H552", process, getpid());
+    line("observer load process=%s pid=%d build=H553", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

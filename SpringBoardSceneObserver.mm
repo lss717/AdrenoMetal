@@ -249,7 +249,7 @@ static id trace_springboard_icon_controller_init(
     return controller;
 }
 
-static void trace_chrono_services_subscribe(id self, SEL selector)
+static id trace_chrono_services_subscribe(id self, SEL selector)
 {
     (void)selector;
     rearm_exception_reporters("chrono");
@@ -257,8 +257,11 @@ static void trace_chrono_services_subscribe(id self, SEL selector)
          getpid(), pthread_main_np(), (__bridge void *) self);
     line("event=h577_chrono_subscribe_skip pid=%d main=%d object=%p",
          getpid(), pthread_main_np(), (__bridge void *) self);
-    line("event=h557_chrono_subscribe_return pid=%d main=%d object=%p skipped=1",
+    line("event=h557_chrono_subscribe_return pid=%d main=%d object=%p skipped=1 result=0",
          getpid(), pthread_main_np(), (__bridge void *) self);
+    line("event=h584_chrono_subscribe_skip_return_nil pid=%d main=%d",
+         getpid(), pthread_main_np());
+    return nil;
 }
 
 static id trace_chrono_assertion(id self, SEL selector)
@@ -1987,7 +1990,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H583", process, getpid());
+    line("observer load process=%s pid=%d build=H584", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

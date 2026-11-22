@@ -65,6 +65,7 @@ static IMP gSpringBoardSetupHUDOriginal;
 static IMP gSoundControllerSharedInstanceOriginal;
 static IMP gSoundControllerInitOriginal;
 static IMP gRingerControlInitOriginal;
+static IMP gStatusDomainDataChangeLogInitOriginal;
 static id gObservedApplication;
 static id gDidFinishLaunchingObserver;
 static id gWillEnterForegroundObserver;
@@ -134,10 +135,9 @@ static void trace_springboard_application_did_finish(
 
 static void trace_springboard_start_system_status_server(id self, SEL selector)
 {
-    (void) self;
-    (void) selector;
     line("event=h542_status_server_bypass_enter pid=%d thread=%p main=%d",
          getpid(), (void *) pthread_self(), pthread_main_np());
+    ((void (*)(id, SEL)) gSpringBoardStartSystemStatusServer)(self, selector);
     line("event=h542_status_server_bypass_return pid=%d thread=%p main=%d",
          getpid(), (void *) pthread_self(), pthread_main_np());
 }
@@ -269,6 +269,20 @@ static id trace_springboard_setup_manager_init(id self, SEL selector)
          (__bridge void *) manager);
     start_setup_return_sampler();
     return manager;
+}
+
+static id trace_status_domain_data_change_log_init(
+    id self, SEL selector, id recordKeys)
+{
+    line("event=h551_status_data_log_empty_init_enter pid=%d thread=%p main=%d object=%p keys=%s",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) self, class_name_or_nil(recordKeys));
+    id changeLog = ((id (*)(id, SEL, id)) gStatusDomainDataChangeLogInitOriginal)(
+        self, selector, [NSArray array]);
+    line("event=h551_status_data_log_empty_init_return pid=%d thread=%p main=%d object=%p",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) changeLog);
+    return changeLog;
 }
 
 extern "C" {
@@ -1063,7 +1077,17 @@ static void install_ca_event_hooks(void)
     const bool ringerInitObserved = install_instance_hook(
         ringerControl, "initWithBannerManager:soundController:",
         (IMP) trace_ringer_control_init, &gRingerControlInitOriginal);
-    line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contextRemote=%d contents=%d commit=%d flush=%d windowHidden=%d windowMakeVisible=%d windowSceneVisible=%d applicationShared=%d springboardStatusServerSkipped=%d springboardDidFinish=%d mcWaitForMigrationSkipped=%d mcShouldShowCloudConfigurationUISkipped=%d setupManagerInitObserved=%d setupHUDObserved=%d soundSharedObserved=%d soundInitObserved=%d ringerInitObserved=%d",
+    Class statusDataChangeLog = NSClassFromString(@"STStatusDomainDataChangeLog");
+    const bool statusDataLogObserved = install_instance_hook(
+        statusDataChangeLog, "initWithRecordKeys:",
+        (IMP) trace_status_domain_data_change_log_init,
+        &gStatusDomainDataChangeLogInitOriginal);
+    line("h550_hud_hooks pid=%d setupHUD=%d soundShared=%d soundInit=%d ringerInit=%d",
+         getpid(), setupHUDObserved ? 1 : 0, soundSharedObserved ? 1 : 0,
+         soundInitObserved ? 1 : 0, ringerInitObserved ? 1 : 0);
+    line("h551_status_hooks pid=%d statusDataLog=%d", getpid(),
+         statusDataLogObserved ? 1 : 0);
+    line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contextRemote=%d contents=%d commit=%d flush=%d windowHidden=%d windowMakeVisible=%d windowSceneVisible=%d applicationShared=%d springboardStatusServerObserved=%d springboardDidFinish=%d mcWaitForMigrationSkipped=%d mcShouldShowCloudConfigurationUISkipped=%d setupManagerInitObserved=%d",
          getpid(), hostId ? 1 : 0, hostVisible ? 1 : 0, contextLayer ? 1 : 0,
          contextRemote ? 1 : 0, contents ? 1 : 0, commit ? 1 : 0,
          flush ? 1 : 0, windowHidden ? 1 : 0, windowMakeVisible ? 1 : 0,
@@ -1071,9 +1095,7 @@ static void install_ca_event_hooks(void)
          springboardStatusServerSkipped ? 1 : 0, springboardDidFinish ? 1 : 0,
          mcWaitForMigrationSkipped ? 1 : 0,
          mcShouldShowCloudConfigurationUISkipped ? 1 : 0,
-         setupManagerInitObserved ? 1 : 0, setupHUDObserved ? 1 : 0,
-         soundSharedObserved ? 1 : 0, soundInitObserved ? 1 : 0,
-         ringerInitObserved ? 1 : 0);
+         setupManagerInitObserved ? 1 : 0);
 }
 
 static void install_application_notifications(void)
@@ -1366,10 +1388,14 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/PrivateFrameworks/ManagedConfiguration.framework/ManagedConfiguration",
            RTLD_NOW);
+    dlopen("/System/Library/PrivateFrameworks/SystemStatus.framework/SystemStatus",
+           RTLD_NOW);
+    dlopen("/System/Library/PrivateFrameworks/SystemStatusServer.framework/SystemStatusServer",
+           RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H550", process, getpid());
+    line("observer load process=%s pid=%d build=H551", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

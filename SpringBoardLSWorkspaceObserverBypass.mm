@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 //
-// H538: skip synchronous LaunchServices setup reached during
-// FBSApplicationLibrary initialization. The caller of
-// -[FBSApplicationLibrary _workQueue_currentProcessProxyWithOutURL:] explicitly
-// handles a nil proxy and continues loading.
+// H539: skip the synchronous LaunchServices paths reached during
+// FBSApplicationLibrary initialization. The three replacements are installed
+// independently so a later class or selector cannot prevent the earlier H537
+// bypasses from being applied. The installation state is published through
+// the observer ABI so it remains observable after CDC attaches.
 
 #import <objc/runtime.h>
 
@@ -11,17 +12,43 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
 extern "C" const char *getprogname(void);
 
-static Method h538_workspace_method;
-static Method h538_enumerate_method;
-static Method h538_current_process_proxy_method;
+enum : uint32_t {
+    kH539WorkerStarted = 1u << 0,
+    kH539CoreServicesLoaded = 1u << 1,
+    kH539WorkspaceClassFound = 1u << 2,
+    kH539AddObserverInstalled = 1u << 3,
+    kH539EnumerateInstalled = 1u << 4,
+    kH539FrontBoardServicesLoaded = 1u << 5,
+    kH539ApplicationLibraryClassFound = 1u << 6,
+    kH539CurrentProxyMethodFound = 1u << 7,
+    kH539CurrentProxyInstalled = 1u << 8,
+    kH539InstallerDone = 1u << 9,
+    kH539InstallerFailed = 1u << 10,
+};
 
-static void h538_line(const char *format, ...)
+static uint32_t h539_state;
+static Method h539_workspace_method;
+static Method h539_enumerate_method;
+static Method h539_current_process_proxy_method;
+
+static void h539_set_state(uint32_t bits)
+{
+    (void) __atomic_fetch_or(&h539_state, bits, __ATOMIC_RELEASE);
+}
+
+extern "C" uint32_t h539_installer_state(void)
+{
+    return __atomic_load_n(&h539_state, __ATOMIC_ACQUIRE);
+}
+
+static void h539_line(const char *format, ...)
 {
     char text[192];
     va_list arguments;
@@ -30,53 +57,60 @@ static void h538_line(const char *format, ...)
     va_end(arguments);
     int console = open("/dev/console", O_WRONLY | O_NOCTTY);
     if (console < 0) return;
-    (void) write(console, "H538_LS: ", 9);
+    (void) write(console, "H539_LS: ", 9);
     (void) write(console, text, strlen(text));
     (void) write(console, "\n", 1);
     close(console);
 }
 
-static void h538_skip_add_observer(id self __unused, SEL command __unused,
+static void h539_skip_add_observer(id self __unused, SEL command __unused,
     id observer)
 {
-    h538_line("observer bypass pid=%d observer=%s",
+    h539_line("observer bypass pid=%d observer=%s",
               getpid(), observer ? object_getClassName(observer) : "nil");
 }
 
-static void h538_skip_application_enumeration(
+static void h539_skip_application_enumeration(
     id self __unused, SEL command __unused, unsigned long type __unused,
     signed char legacy_spi __unused, id block __unused)
 {
-    h538_line("application enumeration skipped pid=%d", getpid());
+    h539_line("application enumeration skipped pid=%d", getpid());
 }
 
-static id h538_skip_current_process_proxy(
+static id h539_skip_current_process_proxy(
     id self __unused, SEL command __unused, id *outURL)
 {
     if (outURL) *outURL = nil;
-    h538_line("current process proxy skipped pid=%d", getpid());
+    h539_line("current process proxy skipped pid=%d", getpid());
     return nil;
 }
 
-static int h538_install_methods(void)
+static bool h539_method_has_replacement(Method method, IMP replacement)
+{
+    return method && method_getImplementation(method) == replacement;
+}
+
+static bool h539_all_methods_installed(void)
 {
     Method workspace_method =
-        __atomic_load_n(&h538_workspace_method, __ATOMIC_ACQUIRE);
+        __atomic_load_n(&h539_workspace_method, __ATOMIC_ACQUIRE);
     Method enumerate_method =
-        __atomic_load_n(&h538_enumerate_method, __ATOMIC_ACQUIRE);
+        __atomic_load_n(&h539_enumerate_method, __ATOMIC_ACQUIRE);
     Method current_process_proxy_method =
-        __atomic_load_n(&h538_current_process_proxy_method, __ATOMIC_ACQUIRE);
-    int workspace_installed = workspace_method &&
-        method_getImplementation(workspace_method) ==
-            (IMP) h538_skip_add_observer;
-    int enumerate_installed = enumerate_method &&
-        method_getImplementation(enumerate_method) ==
-            (IMP) h538_skip_application_enumeration;
-    int current_process_proxy_installed = current_process_proxy_method &&
-        method_getImplementation(current_process_proxy_method) ==
-            (IMP) h538_skip_current_process_proxy;
-    if (workspace_installed && enumerate_installed &&
-        current_process_proxy_installed) {
+        __atomic_load_n(&h539_current_process_proxy_method, __ATOMIC_ACQUIRE);
+    return h539_method_has_replacement(
+               workspace_method, (IMP) h539_skip_add_observer) &&
+        h539_method_has_replacement(
+               enumerate_method, (IMP) h539_skip_application_enumeration) &&
+        h539_method_has_replacement(
+               current_process_proxy_method,
+               (IMP) h539_skip_current_process_proxy);
+}
+
+static int h539_install_methods(void)
+{
+    if (h539_all_methods_installed()) {
+        h539_set_state(kH539InstallerDone);
         return 1;
     }
 
@@ -86,129 +120,146 @@ static int h538_install_methods(void)
             "/System/Library/Frameworks/CoreServices.framework/CoreServices",
             RTLD_NOW | RTLD_GLOBAL);
     }
+    if (core_services) h539_set_state(kH539CoreServicesLoaded);
+
+    Class workspace = (Class) objc_getClass("LSApplicationWorkspace");
+    if (workspace) h539_set_state(kH539WorkspaceClassFound);
+
+    Method add_observer = workspace
+        ? class_getInstanceMethod(workspace, sel_registerName("addObserver:"))
+        : NULL;
+    if (add_observer &&
+        method_getImplementation(add_observer) !=
+            (IMP) h539_skip_add_observer) {
+        IMP previous = method_setImplementation(
+            add_observer, (IMP) h539_skip_add_observer);
+        __atomic_store_n(
+            &h539_workspace_method, add_observer, __ATOMIC_RELEASE);
+        h539_line("addObserver installed method=%p previous=%p pid=%d",
+                  add_observer, previous, getpid());
+    }
+    if (h539_method_has_replacement(
+            add_observer, (IMP) h539_skip_add_observer)) {
+        h539_set_state(kH539AddObserverInstalled);
+    }
+
+    Method enumerate = workspace
+        ? class_getInstanceMethod(
+            workspace,
+            sel_registerName("enumerateBundlesOfType:legacySPI:block:"))
+        : NULL;
+    if (enumerate &&
+        method_getImplementation(enumerate) !=
+            (IMP) h539_skip_application_enumeration) {
+        IMP previous = method_setImplementation(
+            enumerate, (IMP) h539_skip_application_enumeration);
+        __atomic_store_n(
+            &h539_enumerate_method, enumerate, __ATOMIC_RELEASE);
+        h539_line("application enumeration installed method=%p previous=%p pid=%d",
+                  enumerate, previous, getpid());
+    }
+    if (h539_method_has_replacement(
+            enumerate, (IMP) h539_skip_application_enumeration)) {
+        h539_set_state(kH539EnumerateInstalled);
+    }
+
     static void *front_board_services;
     if (!front_board_services) {
         front_board_services = dlopen(
             "/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices",
             RTLD_NOW | RTLD_GLOBAL);
     }
-    Class workspace = (Class) objc_getClass("LSApplicationWorkspace");
+    if (front_board_services) {
+        h539_set_state(kH539FrontBoardServicesLoaded);
+    }
+
     Class application_library = (Class) objc_getClass("FBSApplicationLibrary");
-    Method add_observer = workspace
-        ? class_getInstanceMethod(workspace, sel_registerName("addObserver:"))
-        : NULL;
-    Method enumerate = workspace
-        ? class_getInstanceMethod(
-            workspace,
-            sel_registerName("enumerateBundlesOfType:legacySPI:block:"))
-        : NULL;
+    if (application_library) {
+        h539_set_state(kH539ApplicationLibraryClassFound);
+    }
     Method current_process_proxy = application_library
         ? class_getInstanceMethod(
             application_library,
             sel_registerName("_workQueue_currentProcessProxyWithOutURL:"))
         : NULL;
-    if (!add_observer || !enumerate || !current_process_proxy) return 0;
+    if (current_process_proxy) {
+        h539_set_state(kH539CurrentProxyMethodFound);
+    }
+    if (current_process_proxy &&
+        method_getImplementation(current_process_proxy) !=
+            (IMP) h539_skip_current_process_proxy) {
+        IMP previous = method_setImplementation(
+            current_process_proxy, (IMP) h539_skip_current_process_proxy);
+        __atomic_store_n(
+            &h539_current_process_proxy_method, current_process_proxy,
+            __ATOMIC_RELEASE);
+        h539_line(
+            "current process proxy installed method=%p previous=%p pid=%d",
+            current_process_proxy, previous, getpid());
+    }
+    if (h539_method_has_replacement(
+            current_process_proxy, (IMP) h539_skip_current_process_proxy)) {
+        h539_set_state(kH539CurrentProxyInstalled);
+    }
 
-    IMP previous_add = method_setImplementation(
-        add_observer, (IMP) h538_skip_add_observer);
-    IMP previous_enumerate = method_setImplementation(
-        enumerate, (IMP) h538_skip_application_enumeration);
-    IMP previous_current_process_proxy = method_setImplementation(
-        current_process_proxy, (IMP) h538_skip_current_process_proxy);
-    __atomic_store_n(
-        &h538_workspace_method, add_observer, __ATOMIC_RELEASE);
-    __atomic_store_n(
-        &h538_enumerate_method, enumerate, __ATOMIC_RELEASE);
-    __atomic_store_n(
-        &h538_current_process_proxy_method, current_process_proxy,
-        __ATOMIC_RELEASE);
-    h538_line(
-        "methods installed add=%p previousAdd=%p enumerate=%p "
-        "previousEnumerate=%p currentProxy=%p previousCurrentProxy=%p "
-        "coreServices=%p frontBoardServices=%p class=%p appLibraryClass=%p pid=%d",
-        add_observer, previous_add, enumerate, previous_enumerate,
-        current_process_proxy, previous_current_process_proxy,
-        core_services, front_board_services, workspace, application_library,
-        getpid());
-    return 1;
+    if (h539_all_methods_installed()) {
+        h539_set_state(kH539InstallerDone);
+        h539_line("methods installed state=0x%x pid=%d",
+                  h539_installer_state(), getpid());
+        return 1;
+    }
+    return 0;
 }
 
-static void *h538_install_worker(void *context __unused)
+static void *h539_install_worker(void *context __unused)
 {
-    h538_line("installer worker started pid=%d", getpid());
+    h539_set_state(kH539WorkerStarted);
+    h539_line("installer worker started pid=%d", getpid());
     sleep(5);
-    for (unsigned attempt = 1; attempt <= 30; attempt++) {
-        if (h538_install_methods()) break;
+    for (unsigned attempt = 1; attempt <= 60; attempt++) {
+        if (h539_install_methods()) break;
         if (attempt == 1 || (attempt % 5) == 0) {
-            h538_line("installer waiting attempt=%u class=%p appLibraryClass=%p pid=%d",
-                      attempt, objc_getClass("LSApplicationWorkspace"),
-                      objc_getClass("FBSApplicationLibrary"),
-                      getpid());
+            h539_line(
+                "installer waiting attempt=%u state=0x%x workspace=%p "
+                "applicationLibrary=%p pid=%d",
+                attempt, h539_installer_state(),
+                objc_getClass("LSApplicationWorkspace"),
+                objc_getClass("FBSApplicationLibrary"), getpid());
         }
         sleep(10);
     }
 
-    Method workspace_method =
-        __atomic_load_n(&h538_workspace_method, __ATOMIC_ACQUIRE);
-    Method enumerate_method =
-        __atomic_load_n(&h538_enumerate_method, __ATOMIC_ACQUIRE);
-    Method current_process_proxy_method =
-        __atomic_load_n(&h538_current_process_proxy_method, __ATOMIC_ACQUIRE);
-    if (!workspace_method || !enumerate_method ||
-        !current_process_proxy_method ||
-        method_getImplementation(workspace_method) !=
-            (IMP) h538_skip_add_observer ||
-        method_getImplementation(enumerate_method) !=
-            (IMP) h538_skip_application_enumeration ||
-        method_getImplementation(current_process_proxy_method) !=
-            (IMP) h538_skip_current_process_proxy) {
-        h538_line("installer failed pid=%d", getpid());
-        return NULL;
+    if (!h539_all_methods_installed()) {
+        h539_set_state(kH539InstallerFailed);
     }
 
     for (unsigned interval = 1; interval <= 5; interval++) {
         sleep(120);
-        workspace_method =
-            __atomic_load_n(&h538_workspace_method, __ATOMIC_ACQUIRE);
-        enumerate_method =
-            __atomic_load_n(&h538_enumerate_method, __ATOMIC_ACQUIRE);
-        current_process_proxy_method =
+        h539_line(
+            "verify elapsed=%u state=0x%x add=%p enumerate=%p currentProxy=%p "
+            "installed=%d pid=%d",
+            interval * 120, h539_installer_state(),
+            __atomic_load_n(&h539_workspace_method, __ATOMIC_ACQUIRE),
+            __atomic_load_n(&h539_enumerate_method, __ATOMIC_ACQUIRE),
             __atomic_load_n(
-                &h538_current_process_proxy_method, __ATOMIC_ACQUIRE);
-        IMP add_implementation =
-            method_getImplementation(workspace_method);
-        IMP enumerate_implementation =
-            method_getImplementation(enumerate_method);
-        IMP current_process_proxy_implementation =
-            method_getImplementation(current_process_proxy_method);
-        h538_line(
-            "verify elapsed=%u add=%p addImplementation=%p "
-            "enumerate=%p enumerateImplementation=%p "
-            "currentProxy=%p currentProxyImplementation=%p installed=%d pid=%d",
-            interval * 120, workspace_method, add_implementation,
-            enumerate_method, enumerate_implementation,
-            current_process_proxy_method,
-            current_process_proxy_implementation,
-            add_implementation == (IMP) h538_skip_add_observer &&
-                enumerate_implementation ==
-                    (IMP) h538_skip_application_enumeration &&
-                current_process_proxy_implementation ==
-                    (IMP) h538_skip_current_process_proxy,
-            getpid());
+                &h539_current_process_proxy_method, __ATOMIC_ACQUIRE),
+            h539_all_methods_installed(), getpid());
     }
     return NULL;
 }
 
-__attribute__((constructor)) static void h538_ls_observer_constructor(void)
+__attribute__((constructor)) static void h539_ls_observer_constructor(void)
 {
     const char *process = getprogname();
     if (!process || strncmp(process, "SpringBoard", 11)) return;
 
+    h539_set_state(kH539WorkerStarted);
     pthread_t verifier;
-    int error = pthread_create(&verifier, NULL, h538_install_worker, NULL);
+    int error = pthread_create(&verifier, NULL, h539_install_worker, NULL);
     if (!error) {
         (void) pthread_detach(verifier);
     } else {
-        h538_line("installer thread failed error=%d", error);
+        h539_set_state(kH539InstallerFailed);
+        h539_line("installer thread failed error=%d", error);
     }
 }

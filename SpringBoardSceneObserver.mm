@@ -27,6 +27,7 @@
 #include "NativeAdrenoABI.h"
 
 extern "C" const char *getprogname(void);
+extern "C" uint32_t h539_installer_state(void);
 
 static const uint32_t kTunnelMagic = 0x4e544e4c; /* 'NTNL' */
 static const uint32_t kMethodLog = 17;
@@ -884,6 +885,8 @@ static void snapshot(const char *phase, unsigned sample)
 {
     line("event=h513_snapshot_enter sample=%u phase=%s pid=%d pre_dlopen=1",
          sample, phase, getpid());
+    line("ls_installer sample=%u state=0x%x",
+         sample, h539_installer_state());
     void *frontBoard = dlopen(
         "/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices",
         RTLD_NOW);
@@ -1022,6 +1025,6 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
-    line("observer load process=%s pid=%d build=H538", process, getpid());
+    line("observer load process=%s pid=%d build=H539", process, getpid());
     install_application_notifications();
 }

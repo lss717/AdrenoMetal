@@ -220,8 +220,19 @@ static id trace_springboard_icon_controller_init(
 {
     line("event=h557_icon_controller_init_enter pid=%d main=%d scene=%p",
          getpid(), pthread_main_np(), (__bridge void *) scene);
-    id controller = ((id (*)(id, SEL, id))
-        gSpringBoardIconControllerInitOriginal)(self, selector, scene);
+    id controller = nil;
+    @try {
+        controller = ((id (*)(id, SEL, id))
+            gSpringBoardIconControllerInitOriginal)(self, selector, scene);
+    } @catch (NSException *exception) {
+        char name[80];
+        char reason[160];
+        copy_utf8([exception name], name, sizeof name);
+        copy_utf8([exception reason], reason, sizeof reason);
+        line_reserved(
+            "event=h582_icon_init_exception_caught pid=%d main=%d class=%s name=%.72s reason=%.144s",
+            getpid(), pthread_main_np(), class_name_or_nil(exception), name, reason);
+    }
     line("event=h557_icon_controller_init_return pid=%d main=%d object=%p class=%s",
          getpid(), pthread_main_np(), (__bridge void *) controller,
          class_name_or_nil(controller));
@@ -1966,7 +1977,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H581", process, getpid());
+    line("observer load process=%s pid=%d build=H582", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

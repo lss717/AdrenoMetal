@@ -1009,6 +1009,16 @@ static void snapshot(const char *phase, unsigned sample)
          sample, phase, getpid());
 }
 
+static void *h539_state_reporter(void *context __unused)
+{
+    for (unsigned interval = 1; interval <= 40; ++interval) {
+        sleep(30);
+        line("ls_installer sample=%u state=0x%x",
+             interval * 30, h539_installer_state());
+    }
+    return NULL;
+}
+
 __attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
@@ -1027,4 +1037,11 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_ca_event_hooks();
     line("observer load process=%s pid=%d build=H539", process, getpid());
     install_application_notifications();
+
+    pthread_t reporter;
+    if (pthread_create(&reporter, NULL, h539_state_reporter, NULL) == 0) {
+        (void) pthread_detach(reporter);
+    } else {
+        line("ls_installer reporter thread failed");
+    }
 }

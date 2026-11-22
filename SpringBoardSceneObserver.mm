@@ -50,7 +50,9 @@ static unsigned gLayerCommitEventCount;
 static unsigned gWindowCommitCount[2];
 static unsigned gWindowVisibilityEventCount;
 static bool gVisibilitySnapshotScheduled;
+static bool gApplicationSceneProbeStarted;
 static IMP gApplicationSharedApplication;
+static IMP gSpringBoardApplicationDidFinishLaunching;
 static id gObservedApplication;
 static id gDidFinishLaunchingObserver;
 static id gWillEnterForegroundObserver;
@@ -59,6 +61,7 @@ static id gDidBecomeActiveObserver;
 static void snapshot(const char *phase, unsigned sample) __attribute__((unused));
 static void line(const char *format, ...) __attribute__((format(printf, 1, 2)));
 static const char *class_name_or_nil(id object);
+static void schedule_application_scene_probe(unsigned tick);
 
 static id trace_application_shared_application(id self, SEL selector)
 {
@@ -70,6 +73,18 @@ static id trace_application_shared_application(id self, SEL selector)
     line("event=h515_shared_application_return app=%p class=%s",
          (__bridge void *) application, class_name_or_nil(application));
     return application;
+}
+
+static void trace_springboard_application_did_finish(
+    id self, SEL selector, id notification)
+{
+    line("event=h541_did_finish_enter pid=%d thread=%p main=%d",
+         getpid(), (void *) pthread_self(), pthread_main_np());
+    ((void (*)(id, SEL, id)) gSpringBoardApplicationDidFinishLaunching)(
+        self, selector, notification);
+    line("event=h541_did_finish_return pid=%d thread=%p main=%d",
+         getpid(), (void *) pthread_self(), pthread_main_np());
+    schedule_application_scene_probe(0);
 }
 
 extern "C" {
@@ -676,6 +691,75 @@ static void log_root_window_state(const char *phase)
     }
 }
 
+static void log_application_scene_state(const char *phase)
+{
+    Class applicationClass = NSClassFromString(@"UIApplication");
+    id application = applicationClass
+        ? ((id (*)(id, SEL)) objc_msgSend)(
+              (id) applicationClass, @selector(sharedApplication))
+        : nil;
+    id windows = normalized_collection(read_object(application, "windows"));
+    id scenes = normalized_collection(read_object(application, "connectedScenes"));
+    const unsigned long long windowCount = collection_count(windows);
+    const unsigned long long sceneCount = collection_count(scenes);
+    line("event=h541_application_state phase=%s pid=%d app=%d windows=%llu scenes=%llu",
+         phase, getpid(), application ? 1 : 0, windowCount, sceneCount);
+
+    for (unsigned long long index = 0; index < windowCount && index < 8; ++index) {
+        id window = collection_object_at(windows, index);
+        unsigned long long hidden = 0;
+        unsigned long long visible = 0;
+        const bool hasHidden = read_integer(window, "isHidden", &hidden);
+        const bool hasVisible = read_integer(window, "_isVisible", &visible);
+        id layer = read_object(window, "layer");
+        id windowScene = read_object(window, "windowScene");
+        unsigned long long activation = 0;
+        const bool hasActivation = read_integer(
+            windowScene, "activationState", &activation);
+        line("event=h541_window phase=%s index=%llu class=%.40s hidden=%llu hasHidden=%d visible=%llu hasVisible=%d layer=%.24s scene=%.28s activation=%llu hasActivation=%d",
+             phase, index, class_name_or_nil(window), hidden, hasHidden ? 1 : 0,
+             visible, hasVisible ? 1 : 0, class_name_or_nil(layer),
+             class_name_or_nil(windowScene), activation,
+             hasActivation ? 1 : 0);
+    }
+
+    for (unsigned long long index = 0; index < sceneCount && index < 8; ++index) {
+        id scene = collection_object_at(scenes, index);
+        unsigned long long activation = 0;
+        const bool hasActivation = read_integer(
+            scene, "activationState", &activation);
+        id delegate = read_object(scene, "delegate");
+        char identifier[48];
+        copy_utf8(read_object(scene, "identifier"), identifier, sizeof identifier);
+        line("event=h541_scene phase=%s index=%llu class=%.32s id=%.44s activation=%llu hasActivation=%d delegate=%.32s",
+             phase, index, class_name_or_nil(scene), identifier, activation,
+             hasActivation ? 1 : 0, class_name_or_nil(delegate));
+    }
+    log_root_window_state(phase);
+}
+
+static void schedule_application_scene_probe(unsigned tick)
+{
+    if (tick == 0) {
+        if (gApplicationSceneProbeStarted) return;
+        gApplicationSceneProbeStarted = true;
+    }
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC),
+        dispatch_get_main_queue(), ^{
+            line("event=h541_application_probe tick=%u pid=%d thread=%p main=%d",
+                 tick, getpid(), (void *) pthread_self(), pthread_main_np());
+            if (tick == 0) {
+                log_application_scene_state("h541_first");
+            } else if (tick == 5 || tick == 10 || tick == 20) {
+                char phase[24];
+                snprintf(phase, sizeof phase, "h541_tick_%u", tick);
+                log_application_scene_state(phase);
+            }
+            if (tick < 20) schedule_application_scene_probe(tick + 1);
+        });
+}
+
 static bool install_instance_hook(Class cls, const char *name,
                                   IMP replacement, IMP *original)
 {
@@ -738,11 +822,17 @@ static void install_ca_event_hooks(void)
         applicationClass, "sharedApplication",
         (IMP) trace_application_shared_application,
         &gApplicationSharedApplication);
-    line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contextRemote=%d contents=%d commit=%d flush=%d windowHidden=%d windowMakeVisible=%d windowSceneVisible=%d applicationShared=%d",
+    Class springboard = NSClassFromString(@"SpringBoard");
+    const bool springboardDidFinish = install_instance_hook(
+        springboard, "applicationDidFinishLaunching:",
+        (IMP) trace_springboard_application_did_finish,
+        &gSpringBoardApplicationDidFinishLaunching);
+    line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contextRemote=%d contents=%d commit=%d flush=%d windowHidden=%d windowMakeVisible=%d windowSceneVisible=%d applicationShared=%d springboardDidFinish=%d",
          getpid(), hostId ? 1 : 0, hostVisible ? 1 : 0, contextLayer ? 1 : 0,
          contextRemote ? 1 : 0, contents ? 1 : 0, commit ? 1 : 0,
          flush ? 1 : 0, windowHidden ? 1 : 0, windowMakeVisible ? 1 : 0,
-         windowSceneVisible ? 1 : 0, applicationShared ? 1 : 0);
+         windowSceneVisible ? 1 : 0, applicationShared ? 1 : 0,
+         springboardDidFinish ? 1 : 0);
 }
 
 static void install_application_notifications(void)
@@ -1035,8 +1125,9 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
-    line("observer load process=%s pid=%d build=H540", process, getpid());
+    line("observer load process=%s pid=%d build=H541", process, getpid());
     install_application_notifications();
+    schedule_application_scene_probe(0);
 
     pthread_t reporter;
     if (pthread_create(&reporter, NULL, h539_state_reporter, NULL) == 0) {

@@ -830,6 +830,17 @@ static void rearm_exception_reporters(const char *site)
 [[noreturn]] static void h575_cxa_throw(
     void *exception, std::type_info *type, void (*destructor)(void *))
 {
+    if (type && !strcmp(type->name(), "NSException")) {
+        id object = (__bridge id) exception;
+        char name[80] = "-";
+        char reason[160] = "-";
+        copy_utf8([object name], name, sizeof name);
+        copy_utf8([object reason], reason, sizeof reason);
+        line_reserved(
+            "event=h581_nsexception pid=%d main=%d class=%s name=%.72s reason=%.144s caller=%p",
+            getpid(), pthread_main_np(), class_name_or_nil(object), name, reason,
+            __builtin_return_address(0));
+    }
     line_reserved(
         "event=h575_cxx_throw pid=%d thread=%p main=%d type=%.112s exception=%p caller=%p",
         getpid(), (void *) pthread_self(), pthread_main_np(),
@@ -1955,7 +1966,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H580", process, getpid());
+    line("observer load process=%s pid=%d build=H581", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

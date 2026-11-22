@@ -221,12 +221,10 @@ static id trace_springboard_icon_controller_init(
 
 static void trace_chrono_services_subscribe(id self, SEL selector)
 {
-    (void) selector;
     line("event=h557_chrono_subscribe_enter pid=%d main=%d object=%p",
          getpid(), pthread_main_np(), (__bridge void *) self);
-    line("event=h574_chrono_subscribe_skip pid=%d main=%d object=%p",
-         getpid(), pthread_main_np(), (__bridge void *) self);
-    line("event=h557_chrono_subscribe_return pid=%d main=%d object=%p skipped=1",
+    ((void (*)(id, SEL)) gChronoServicesSubscribeOriginal)(self, selector);
+    line("event=h557_chrono_subscribe_return pid=%d main=%d object=%p",
          getpid(), pthread_main_np(), (__bridge void *) self);
 }
 
@@ -723,6 +721,28 @@ static void trace_cxx_terminate()
     if (previous && previous != trace_cxx_terminate) previous();
     std::abort();
 }
+
+extern "C" [[noreturn]] void __cxa_throw(
+    void *exception, std::type_info *type, void (*destructor)(void *));
+
+extern "C" [[noreturn]] static void h575_cxa_throw(
+    void *exception, std::type_info *type, void (*destructor)(void *))
+{
+    line_reserved(
+        "event=h575_cxx_throw pid=%d thread=%p main=%d type=%.112s exception=%p caller=%p",
+        getpid(), (void *) pthread_self(), pthread_main_np(),
+        type ? type->name() : "<no-type>", exception,
+        __builtin_return_address(0));
+    __cxa_throw(exception, type, destructor);
+}
+
+__attribute__((used, section("__DATA,__interpose")))
+static const DyldInterpose gCxaThrowInterpose[] = {
+    {
+        (const void *) h575_cxa_throw,
+        (const void *) __cxa_throw,
+    },
+};
 
 static const char *class_name_or_nil(id object)
 {
@@ -1827,7 +1847,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H574", process, getpid());
+    line("observer load process=%s pid=%d build=H575", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

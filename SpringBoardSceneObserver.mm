@@ -221,6 +221,7 @@ static id trace_springboard_icon_controller_init(
 
 static void trace_chrono_services_subscribe(id self, SEL selector)
 {
+    (void) selector;
     line("event=h557_chrono_subscribe_enter pid=%d main=%d object=%p",
          getpid(), pthread_main_np(), (__bridge void *) self);
     line("event=h574_chrono_subscribe_skip pid=%d main=%d object=%p",

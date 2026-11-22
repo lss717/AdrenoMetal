@@ -730,14 +730,14 @@ static void trace_cxx_terminate()
         getpid(), (void *) pthread_self(), pthread_main_np(),
         type ? type->name() : "<no-type>", exception,
         __builtin_return_address(0));
-    __cxa_throw(exception, type, destructor);
+    abi::__cxa_throw(exception, type, destructor);
 }
 
 __attribute__((used, section("__DATA,__interpose")))
 static const DyldInterpose gCxaThrowInterpose[] = {
     {
         (const void *) h575_cxa_throw,
-        (const void *) __cxa_throw,
+        (const void *) &abi::__cxa_throw,
     },
 };
 

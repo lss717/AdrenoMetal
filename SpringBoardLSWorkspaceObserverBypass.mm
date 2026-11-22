@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// H539: skip the synchronous LaunchServices paths reached during
+// H540: skip the synchronous LaunchServices paths reached during
 // FBSApplicationLibrary initialization. The three replacements are installed
 // independently so a later class or selector cannot prevent the earlier H537
 // bypasses from being applied. The installation state is published through
@@ -31,12 +31,19 @@ enum : uint32_t {
     kH539CurrentProxyInstalled = 1u << 8,
     kH539InstallerDone = 1u << 9,
     kH539InstallerFailed = 1u << 10,
+    kH540ProxyClassFound = 1u << 11,
+    kH540ProxyIdentifierMethodFound = 1u << 12,
+    kH540ProxyIdentifierInstalled = 1u << 13,
+    kH540ProxyURLMethodFound = 1u << 14,
+    kH540ProxyURLInstalled = 1u << 15,
 };
 
 static uint32_t h539_state;
 static Method h539_workspace_method;
 static Method h539_enumerate_method;
 static Method h539_current_process_proxy_method;
+static Method h540_proxy_identifier_method;
+static Method h540_proxy_url_method;
 
 static void h539_set_state(uint32_t bits)
 {
@@ -57,7 +64,7 @@ static void h539_line(const char *format, ...)
     va_end(arguments);
     int console = open("/dev/console", O_WRONLY | O_NOCTTY);
     if (console < 0) return;
-    (void) write(console, "H539_LS: ", 9);
+    (void) write(console, "H540_LS: ", 9);
     (void) write(console, text, strlen(text));
     (void) write(console, "\n", 1);
     close(console);
@@ -85,6 +92,20 @@ static id h539_skip_current_process_proxy(
     return nil;
 }
 
+static id h540_skip_proxy_for_identifier(
+    id self __unused, SEL command __unused, id identifier __unused)
+{
+    h539_line("application proxy identifier skipped pid=%d", getpid());
+    return nil;
+}
+
+static id h540_skip_proxy_for_bundle_url(
+    id self __unused, SEL command __unused, id url __unused)
+{
+    h539_line("application proxy URL skipped pid=%d", getpid());
+    return nil;
+}
+
 static bool h539_method_has_replacement(Method method, IMP replacement)
 {
     return method && method_getImplementation(method) == replacement;
@@ -98,13 +119,21 @@ static bool h539_all_methods_installed(void)
         __atomic_load_n(&h539_enumerate_method, __ATOMIC_ACQUIRE);
     Method current_process_proxy_method =
         __atomic_load_n(&h539_current_process_proxy_method, __ATOMIC_ACQUIRE);
+    Method proxy_identifier_method =
+        __atomic_load_n(&h540_proxy_identifier_method, __ATOMIC_ACQUIRE);
+    Method proxy_url_method =
+        __atomic_load_n(&h540_proxy_url_method, __ATOMIC_ACQUIRE);
     return h539_method_has_replacement(
                workspace_method, (IMP) h539_skip_add_observer) &&
         h539_method_has_replacement(
                enumerate_method, (IMP) h539_skip_application_enumeration) &&
         h539_method_has_replacement(
                current_process_proxy_method,
-               (IMP) h539_skip_current_process_proxy);
+               (IMP) h539_skip_current_process_proxy) &&
+        h539_method_has_replacement(
+               proxy_identifier_method, (IMP) h540_skip_proxy_for_identifier) &&
+        h539_method_has_replacement(
+               proxy_url_method, (IMP) h540_skip_proxy_for_bundle_url);
 }
 
 static int h539_install_methods(void)
@@ -200,6 +229,58 @@ static int h539_install_methods(void)
     if (h539_method_has_replacement(
             current_process_proxy, (IMP) h539_skip_current_process_proxy)) {
         h539_set_state(kH539CurrentProxyInstalled);
+    }
+
+    Class application_proxy = (Class) objc_getClass("LSApplicationProxy");
+    if (application_proxy) {
+        h539_set_state(kH540ProxyClassFound);
+    }
+    Method proxy_identifier = application_proxy
+        ? class_getClassMethod(
+            application_proxy,
+            sel_registerName("applicationProxyForIdentifier:"))
+        : NULL;
+    if (proxy_identifier) {
+        h539_set_state(kH540ProxyIdentifierMethodFound);
+    }
+    if (proxy_identifier &&
+        method_getImplementation(proxy_identifier) !=
+            (IMP) h540_skip_proxy_for_identifier) {
+        IMP previous = method_setImplementation(
+            proxy_identifier, (IMP) h540_skip_proxy_for_identifier);
+        __atomic_store_n(
+            &h540_proxy_identifier_method, proxy_identifier, __ATOMIC_RELEASE);
+        h539_line(
+            "application proxy identifier installed method=%p previous=%p pid=%d",
+            proxy_identifier, previous, getpid());
+    }
+    if (h539_method_has_replacement(
+            proxy_identifier, (IMP) h540_skip_proxy_for_identifier)) {
+        h539_set_state(kH540ProxyIdentifierInstalled);
+    }
+
+    Method proxy_url = application_proxy
+        ? class_getClassMethod(
+            application_proxy,
+            sel_registerName("applicationProxyForBundleURL:"))
+        : NULL;
+    if (proxy_url) {
+        h539_set_state(kH540ProxyURLMethodFound);
+    }
+    if (proxy_url &&
+        method_getImplementation(proxy_url) !=
+            (IMP) h540_skip_proxy_for_bundle_url) {
+        IMP previous = method_setImplementation(
+            proxy_url, (IMP) h540_skip_proxy_for_bundle_url);
+        __atomic_store_n(
+            &h540_proxy_url_method, proxy_url, __ATOMIC_RELEASE);
+        h539_line(
+            "application proxy URL installed method=%p previous=%p pid=%d",
+            proxy_url, previous, getpid());
+    }
+    if (h539_method_has_replacement(
+            proxy_url, (IMP) h540_skip_proxy_for_bundle_url)) {
+        h539_set_state(kH540ProxyURLInstalled);
     }
 
     if (h539_all_methods_installed()) {

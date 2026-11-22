@@ -53,6 +53,7 @@ static bool gVisibilitySnapshotScheduled;
 static bool gApplicationSceneProbeStarted;
 static IMP gApplicationSharedApplication;
 static IMP gSpringBoardApplicationDidFinishLaunching;
+static IMP gSpringBoardStartSystemStatusServer;
 static id gObservedApplication;
 static id gDidFinishLaunchingObserver;
 static id gWillEnterForegroundObserver;
@@ -62,6 +63,7 @@ static void snapshot(const char *phase, unsigned sample) __attribute__((unused))
 static void line(const char *format, ...) __attribute__((format(printf, 1, 2)));
 static const char *class_name_or_nil(id object);
 static void schedule_application_scene_probe(unsigned tick);
+static void log_application_scene_state(const char *phase);
 
 static id trace_application_shared_application(id self, SEL selector)
 {
@@ -85,6 +87,17 @@ static void trace_springboard_application_did_finish(
     line("event=h541_did_finish_return pid=%d thread=%p main=%d",
          getpid(), (void *) pthread_self(), pthread_main_np());
     schedule_application_scene_probe(0);
+    log_application_scene_state("h542_after_did_finish");
+}
+
+static void trace_springboard_start_system_status_server(id self, SEL selector)
+{
+    (void) self;
+    (void) selector;
+    line("event=h542_status_server_bypass_enter pid=%d thread=%p main=%d",
+         getpid(), (void *) pthread_self(), pthread_main_np());
+    line("event=h542_status_server_bypass_return pid=%d thread=%p main=%d",
+         getpid(), (void *) pthread_self(), pthread_main_np());
 }
 
 extern "C" {
@@ -823,16 +836,20 @@ static void install_ca_event_hooks(void)
         (IMP) trace_application_shared_application,
         &gApplicationSharedApplication);
     Class springboard = NSClassFromString(@"SpringBoard");
+    const bool springboardStatusServerSkipped = install_instance_hook(
+        springboard, "_startSystemStatusServerAndFriends",
+        (IMP) trace_springboard_start_system_status_server,
+        &gSpringBoardStartSystemStatusServer);
     const bool springboardDidFinish = install_instance_hook(
         springboard, "applicationDidFinishLaunching:",
         (IMP) trace_springboard_application_did_finish,
         &gSpringBoardApplicationDidFinishLaunching);
-    line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contextRemote=%d contents=%d commit=%d flush=%d windowHidden=%d windowMakeVisible=%d windowSceneVisible=%d applicationShared=%d springboardDidFinish=%d",
+    line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contextRemote=%d contents=%d commit=%d flush=%d windowHidden=%d windowMakeVisible=%d windowSceneVisible=%d applicationShared=%d springboardStatusServerSkipped=%d springboardDidFinish=%d",
          getpid(), hostId ? 1 : 0, hostVisible ? 1 : 0, contextLayer ? 1 : 0,
          contextRemote ? 1 : 0, contents ? 1 : 0, commit ? 1 : 0,
          flush ? 1 : 0, windowHidden ? 1 : 0, windowMakeVisible ? 1 : 0,
          windowSceneVisible ? 1 : 0, applicationShared ? 1 : 0,
-         springboardDidFinish ? 1 : 0);
+         springboardStatusServerSkipped ? 1 : 0, springboardDidFinish ? 1 : 0);
 }
 
 static void install_application_notifications(void)
@@ -1125,7 +1142,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
-    line("observer load process=%s pid=%d build=H541", process, getpid());
+    line("observer load process=%s pid=%d build=H542", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

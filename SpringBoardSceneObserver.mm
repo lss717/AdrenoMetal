@@ -197,8 +197,18 @@ static void trace_springboard_complete_startup(id self, SEL selector, id scene)
     line("event=h557_complete_startup_enter pid=%d thread=%p main=%d scene=%p",
          getpid(), (void *) pthread_self(), pthread_main_np(),
          (__bridge void *) scene);
-    ((void (*)(id, SEL, id)) gSpringBoardCompleteStartupOriginal)(
-        self, selector, scene);
+    @try {
+        ((void (*)(id, SEL, id)) gSpringBoardCompleteStartupOriginal)(
+            self, selector, scene);
+    } @catch (NSException *exception) {
+        char name[80];
+        char reason[160];
+        copy_utf8([exception name], name, sizeof name);
+        copy_utf8([exception reason], reason, sizeof reason);
+        line_reserved(
+            "event=h583_complete_startup_exception_caught pid=%d main=%d class=%s name=%.72s reason=%.144s",
+            getpid(), pthread_main_np(), class_name_or_nil(exception), name, reason);
+    }
     line("event=h557_complete_startup_return pid=%d thread=%p main=%d",
          getpid(), (void *) pthread_self(), pthread_main_np());
 }
@@ -1977,7 +1987,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H582", process, getpid());
+    line("observer load process=%s pid=%d build=H583", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

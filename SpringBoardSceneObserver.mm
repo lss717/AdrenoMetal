@@ -66,6 +66,9 @@ static IMP gSoundControllerSharedInstanceOriginal;
 static IMP gSoundControllerInitOriginal;
 static IMP gRingerControlInitOriginal;
 static IMP gStatusDomainDataChangeLogInitOriginal;
+static IMP gTelephonyManagerSharedOriginal;
+static IMP gTelephonyManagerSharedCreatingOriginal;
+static IMP gTelephonyManagerInitOriginal;
 static id gObservedApplication;
 static id gDidFinishLaunchingObserver;
 static id gWillEnterForegroundObserver;
@@ -283,6 +286,47 @@ static id trace_status_domain_data_change_log_init(
          getpid(), (void *) pthread_self(), pthread_main_np(),
          (__bridge void *) changeLog);
     return changeLog;
+}
+
+static id trace_telephony_manager_shared(id self, SEL selector)
+{
+    line("event=h552_telephony_shared_enter pid=%d thread=%p main=%d receiver=%s",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         class_name_or_nil(self));
+    id manager = ((id (*)(id, SEL)) gTelephonyManagerSharedOriginal)(
+        self, selector);
+    line("event=h552_telephony_shared_return pid=%d thread=%p main=%d object=%p class=%s",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) manager, class_name_or_nil(manager));
+    return manager;
+}
+
+static id trace_telephony_manager_shared_creating(
+    id self, SEL selector, BOOL creatingIfNecessary)
+{
+    line("event=h552_telephony_shared_creating_enter pid=%d thread=%p main=%d create=%d",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         creatingIfNecessary ? 1 : 0);
+    id manager = ((id (*)(id, SEL, BOOL))
+        gTelephonyManagerSharedCreatingOriginal)(
+            self, selector, creatingIfNecessary);
+    line("event=h552_telephony_shared_creating_return pid=%d thread=%p main=%d object=%p class=%s",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) manager, class_name_or_nil(manager));
+    return manager;
+}
+
+static id trace_telephony_manager_init(id self, SEL selector)
+{
+    line("event=h552_telephony_init_enter pid=%d thread=%p main=%d object=%p",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) self);
+    id manager = ((id (*)(id, SEL)) gTelephonyManagerInitOriginal)(
+        self, selector);
+    line("event=h552_telephony_init_return pid=%d thread=%p main=%d object=%p",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) manager);
+    return manager;
 }
 
 extern "C" {
@@ -1082,11 +1126,27 @@ static void install_ca_event_hooks(void)
         statusDataChangeLog, "initWithRecordKeys:",
         (IMP) trace_status_domain_data_change_log_init,
         &gStatusDomainDataChangeLogInitOriginal);
+    Class telephonyManager = NSClassFromString(@"SBTelephonyManager");
+    const bool telephonySharedObserved = install_class_hook(
+        telephonyManager, "sharedTelephonyManager",
+        (IMP) trace_telephony_manager_shared,
+        &gTelephonyManagerSharedOriginal);
+    const bool telephonySharedCreatingObserved = install_class_hook(
+        telephonyManager, "sharedTelephonyManagerCreatingIfNecessary:",
+        (IMP) trace_telephony_manager_shared_creating,
+        &gTelephonyManagerSharedCreatingOriginal);
+    const bool telephonyInitObserved = install_instance_hook(
+        telephonyManager, "init", (IMP) trace_telephony_manager_init,
+        &gTelephonyManagerInitOriginal);
     line("h550_hud_hooks pid=%d setupHUD=%d soundShared=%d soundInit=%d ringerInit=%d",
          getpid(), setupHUDObserved ? 1 : 0, soundSharedObserved ? 1 : 0,
          soundInitObserved ? 1 : 0, ringerInitObserved ? 1 : 0);
     line("h551_status_hooks pid=%d statusDataLog=%d", getpid(),
          statusDataLogObserved ? 1 : 0);
+    line("h552_telephony_hooks pid=%d shared=%d creating=%d init=%d",
+         getpid(), telephonySharedObserved ? 1 : 0,
+         telephonySharedCreatingObserved ? 1 : 0,
+         telephonyInitObserved ? 1 : 0);
     line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contextRemote=%d contents=%d commit=%d flush=%d windowHidden=%d windowMakeVisible=%d windowSceneVisible=%d applicationShared=%d springboardStatusServerObserved=%d springboardDidFinish=%d mcWaitForMigrationSkipped=%d mcShouldShowCloudConfigurationUISkipped=%d setupManagerInitObserved=%d",
          getpid(), hostId ? 1 : 0, hostVisible ? 1 : 0, contextLayer ? 1 : 0,
          contextRemote ? 1 : 0, contents ? 1 : 0, commit ? 1 : 0,
@@ -1395,7 +1455,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H551", process, getpid());
+    line("observer load process=%s pid=%d build=H552", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

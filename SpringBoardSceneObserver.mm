@@ -54,6 +54,7 @@ static bool gApplicationSceneProbeStarted;
 static IMP gApplicationSharedApplication;
 static IMP gSpringBoardApplicationDidFinishLaunching;
 static IMP gSpringBoardStartSystemStatusServer;
+static IMP gMCProfileConnectionWaitForMigration;
 static id gObservedApplication;
 static id gDidFinishLaunchingObserver;
 static id gWillEnterForegroundObserver;
@@ -97,6 +98,20 @@ static void trace_springboard_start_system_status_server(id self, SEL selector)
     line("event=h542_status_server_bypass_enter pid=%d thread=%p main=%d",
          getpid(), (void *) pthread_self(), pthread_main_np());
     line("event=h542_status_server_bypass_return pid=%d thread=%p main=%d",
+         getpid(), (void *) pthread_self(), pthread_main_np());
+}
+
+static void trace_mc_wait_for_migration(
+    id self, SEL selector, BOOL includingPostRestore,
+    BOOL waitUntilCompleted, id completion)
+{
+    (void) self;
+    (void) selector;
+    line("event=h543_mc_wait_bypass_enter pid=%d thread=%p main=%d include=%d wait=%d completion=%d",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         includingPostRestore ? 1 : 0, waitUntilCompleted ? 1 : 0,
+         completion ? 1 : 0);
+    line("event=h543_mc_wait_bypass_return pid=%d thread=%p main=%d",
          getpid(), (void *) pthread_self(), pthread_main_np());
 }
 
@@ -844,12 +859,19 @@ static void install_ca_event_hooks(void)
         springboard, "applicationDidFinishLaunching:",
         (IMP) trace_springboard_application_did_finish,
         &gSpringBoardApplicationDidFinishLaunching);
-    line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contextRemote=%d contents=%d commit=%d flush=%d windowHidden=%d windowMakeVisible=%d windowSceneVisible=%d applicationShared=%d springboardStatusServerSkipped=%d springboardDidFinish=%d",
+    Class profileConnection = NSClassFromString(@"MCProfileConnection");
+    const bool mcWaitForMigrationSkipped = install_instance_hook(
+        profileConnection,
+        "waitForMigrationIncludingPostRestoreMigration:waitUntilCompleted:completion:",
+        (IMP) trace_mc_wait_for_migration,
+        &gMCProfileConnectionWaitForMigration);
+    line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contextRemote=%d contents=%d commit=%d flush=%d windowHidden=%d windowMakeVisible=%d windowSceneVisible=%d applicationShared=%d springboardStatusServerSkipped=%d springboardDidFinish=%d mcWaitForMigrationSkipped=%d",
          getpid(), hostId ? 1 : 0, hostVisible ? 1 : 0, contextLayer ? 1 : 0,
          contextRemote ? 1 : 0, contents ? 1 : 0, commit ? 1 : 0,
          flush ? 1 : 0, windowHidden ? 1 : 0, windowMakeVisible ? 1 : 0,
          windowSceneVisible ? 1 : 0, applicationShared ? 1 : 0,
-         springboardStatusServerSkipped ? 1 : 0, springboardDidFinish ? 1 : 0);
+         springboardStatusServerSkipped ? 1 : 0, springboardDidFinish ? 1 : 0,
+         mcWaitForMigrationSkipped ? 1 : 0);
 }
 
 static void install_application_notifications(void)
@@ -1140,9 +1162,11 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
          process, getpid());
     dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices",
            RTLD_NOW);
+    dlopen("/System/Library/PrivateFrameworks/ManagedConfiguration.framework/ManagedConfiguration",
+           RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
-    line("observer load process=%s pid=%d build=H542", process, getpid());
+    line("observer load process=%s pid=%d build=H543", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

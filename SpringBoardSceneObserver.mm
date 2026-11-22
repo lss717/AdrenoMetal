@@ -239,6 +239,14 @@ static void trace_chrono_services_subscribe(id self, SEL selector)
          getpid(), pthread_main_np(), (__bridge void *) self);
 }
 
+static id trace_chrono_assertion(id self, SEL selector)
+{
+    (void)selector;
+    line("event=h579_chrono_assertion_stub pid=%d main=%d object=%p",
+         getpid(), pthread_main_np(), (__bridge void *) self);
+    return nil;
+}
+
 static void trace_application_run(id self, SEL selector)
 {
     line("event=h557_ui_run_enter pid=%d thread=%p main=%d",
@@ -1547,6 +1555,7 @@ static void install_ca_event_hooks(void)
 
 static void install_h557_startup_hooks(void)
 {
+    Class chronoServicesClass = NSClassFromString(@"CHSChronoServicesConnection");
     const bool completeStartup = install_instance_hook(
         NSClassFromString(@"SpringBoard"),
         "_completeStartupAfterMainSceneConnect:",
@@ -1562,10 +1571,13 @@ static void install_h557_startup_hooks(void)
         (IMP) trace_springboard_icon_controller_init,
         &gSpringBoardIconControllerInitOriginal);
     const bool chronoSubscribe = install_instance_hook(
-        NSClassFromString(@"CHSChronoServicesConnection"),
+        chronoServicesClass,
         "_subscribeToExtensions",
         (IMP) trace_chrono_services_subscribe,
         &gChronoServicesSubscribeOriginal);
+    const bool chronoAssertion = chronoServicesClass &&
+        class_addMethod(chronoServicesClass, sel_registerName("assertion"),
+                        (IMP) trace_chrono_assertion, "@@:");
     const bool applicationRun = install_instance_hook(
         NSClassFromString(@"UIApplication"), "_run",
         (IMP) trace_application_run, &gApplicationRunOriginal);
@@ -1573,6 +1585,8 @@ static void install_h557_startup_hooks(void)
          getpid(), completeStartup ? 1 : 0, uiControllerShared ? 1 : 0,
          iconControllerInit ? 1 : 0, chronoSubscribe ? 1 : 0,
          applicationRun ? 1 : 0);
+    line("event=h579_chrono_assertion_stub_installed pid=%d class=%d added=%d",
+         getpid(), chronoServicesClass ? 1 : 0, chronoAssertion ? 1 : 0);
 }
 
 static void install_application_notifications(void)
@@ -1909,7 +1923,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H578", process, getpid());
+    line("observer load process=%s pid=%d build=H579", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

@@ -11,6 +11,8 @@
 #import <objc/message.h>
 #include <IOKit/IOKitLib.h>
 #include <mach/mach.h>
+#include <mach/arm/thread_status.h>
+#include <mach/thread_act.h>
 #include <sys/proc.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -63,6 +65,7 @@ static id gObservedApplication;
 static id gDidFinishLaunchingObserver;
 static id gWillEnterForegroundObserver;
 static id gDidBecomeActiveObserver;
+static bool gSetupReturnSamplerStarted;
 
 static void snapshot(const char *phase, unsigned sample) __attribute__((unused));
 static void line(const char *format, ...) __attribute__((format(printf, 1, 2)));
@@ -158,6 +161,46 @@ static BOOL trace_mc_should_show_cloud_configuration_ui(id self, SEL selector)
     return NO;
 }
 
+static void *sample_main_thread_after_setup_return(void *context)
+{
+    mach_port_t thread = (mach_port_t)(uintptr_t)context;
+    static const unsigned delays[] = { 1, 2, 4, 7 };
+    unsigned previous = 0;
+    for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
+        usleep((useconds_t)(delays[index] - previous) * 1000000);
+        previous = delays[index];
+
+        arm_thread_state64_t state;
+        mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+        kern_return_t status = thread_get_state(
+            thread, ARM_THREAD_STATE64, (thread_state_t)&state, &count);
+        line("event=h549_setup_return_main_sample delay=%u kr=0x%x count=%u pc=0x%llx lr=0x%llx sp=0x%llx fp=0x%llx",
+             delays[index], status, (unsigned)count,
+             (unsigned long long)state.__pc,
+             (unsigned long long)state.__lr,
+             (unsigned long long)state.__sp,
+             (unsigned long long)state.__fp);
+    }
+    return NULL;
+}
+
+static void start_setup_return_sampler(void)
+{
+    if (gSetupReturnSamplerStarted) return;
+    gSetupReturnSamplerStarted = true;
+
+    mach_port_t mainThread = pthread_mach_thread_np(pthread_self());
+    pthread_t sampler;
+    if (pthread_create(&sampler, NULL, sample_main_thread_after_setup_return,
+                       (void *)(uintptr_t)mainThread) == 0) {
+        (void) pthread_detach(sampler);
+        line("event=h549_setup_return_sampler_start pid=%d thread_port=0x%x",
+             getpid(), mainThread);
+    } else {
+        line("event=h549_setup_return_sampler_start_failed pid=%d", getpid());
+    }
+}
+
 static id trace_springboard_setup_manager_init(id self, SEL selector)
 {
     line("event=h546_setup_manager_init_enter pid=%d thread=%p main=%d object=%p",
@@ -168,6 +211,7 @@ static id trace_springboard_setup_manager_init(id self, SEL selector)
     line("event=h546_setup_manager_init_return pid=%d thread=%p main=%d object=%p",
          getpid(), (void *) pthread_self(), pthread_main_np(),
          (__bridge void *) manager);
+    start_setup_return_sampler();
     return manager;
 }
 

@@ -28,6 +28,7 @@
 
 extern "C" const char *getprogname(void);
 extern "C" uint32_t h539_installer_state(void);
+extern "C" BOOL BYSetupAssistantNeedsToRun(void);
 
 static const uint32_t kTunnelMagic = 0x4e544e4c; /* 'NTNL' */
 static const uint32_t kMethodLog = 17;
@@ -67,6 +68,24 @@ static void line(const char *format, ...) __attribute__((format(printf, 1, 2)));
 static const char *class_name_or_nil(id object);
 static void schedule_application_scene_probe(unsigned tick);
 static void log_application_scene_state(const char *phase);
+
+static BOOL trace_by_setup_assistant_needs_to_run(void)
+{
+    line("event=h547_by_setup_assistant_needs_to_run_bypass pid=%d thread=%p main=%d",
+         getpid(), (void *) pthread_self(), pthread_main_np());
+    return NO;
+}
+
+struct DyldInterpose {
+    const void *replacement;
+    const void *replacee;
+};
+
+__attribute__((used, section("__DATA,__interpose")))
+static const DyldInterpose gSetupAssistantInterpose = {
+    (const void *) trace_by_setup_assistant_needs_to_run,
+    (const void *) BYSetupAssistantNeedsToRun,
+};
 
 static id trace_application_shared_application(id self, SEL selector)
 {
@@ -1200,7 +1219,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
-    line("observer load process=%s pid=%d build=H546", process, getpid());
+    line("observer load process=%s pid=%d build=H547", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

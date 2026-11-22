@@ -91,6 +91,14 @@ static id gDidFinishLaunchingObserver;
 static id gWillEnterForegroundObserver;
 static id gDidBecomeActiveObserver;
 static bool gSetupReturnSamplerStarted;
+static bool gConsoleOnly;
+static IMP gBSXPCSendSynchronouslyOriginal;
+static IMP gNSXPCDecodeMessageOriginal;
+static IMP gNSXPCConnectionInitMachServiceOriginal;
+static IMP gNSXPCListenerInitMachServiceOriginal;
+static IMP gNSXPCConnectionResumeOriginal;
+static unsigned gBSXPCSendEventCount;
+static unsigned gNSXPCDecodeEventCount;
 
 static void snapshot(const char *phase, unsigned sample) __attribute__((unused));
 static void line(const char *format, ...) __attribute__((format(printf, 1, 2)));
@@ -553,7 +561,7 @@ static void emit(const char *text)
         }
     }
 
-    if (!connect_accelerator()) return;
+    if (gConsoleOnly || !connect_accelerator()) return;
     struct {
         uint32_t magic, method, bytes, reserved;
         char text[kMaxLog];
@@ -1408,6 +1416,169 @@ static void install_ca_event_hooks(void)
          setupManagerInitObserved ? 1 : 0);
 }
 
+static BOOL trace_bsxpc_send_synchronously(
+    id self, SEL selector, NSError **error)
+{
+    if (gBSXPCSendEventCount < 64) {
+        char description[161] = {};
+        id object = nil;
+        @try {
+            object = [self description];
+        } @catch (id ignored) {
+        }
+        copy_utf8(object, description, sizeof description);
+        ++gBSXPCSendEventCount;
+        line("event=h560_bsxpc_sync_enter pid=%d thread=%p main=%d "
+             "object=%p class=%s description=%s encoding=%s",
+             getpid(), (void *) pthread_self(), pthread_main_np(),
+             (__bridge void *) self, class_name_or_nil(self), description,
+             instance_encoding(self, "sendSynchronouslyWithError:"));
+    }
+    BOOL result = ((BOOL (*)(id, SEL, NSError **))
+        gBSXPCSendSynchronouslyOriginal)(self, selector, error);
+    if (gBSXPCSendEventCount < 64) {
+        line("event=h560_bsxpc_sync_return pid=%d thread=%p main=%d "
+             "object=%p result=%d error=%p error_code=%ld",
+             getpid(), (void *) pthread_self(), pthread_main_np(),
+             (__bridge void *) self, result ? 1 : 0,
+             (__bridge void *) (error ? *error : nil),
+             error && *error ? (long) [*error code] : 0L);
+    }
+    return result;
+}
+
+static void trace_nsxpc_decode_message(
+    id self, SEL selector, id event, id reply, uint64_t flags)
+{
+    if (gNSXPCDecodeEventCount < 64) {
+        ++gNSXPCDecodeEventCount;
+        line("event=h560_nsxpc_decode_enter pid=%d thread=%p main=%d "
+             "connection=%p event=%p event_class=%s reply=%p flags=0x%llx encoding=%s",
+             getpid(), (void *) pthread_self(), pthread_main_np(),
+             (__bridge void *) self, (__bridge void *) event,
+             class_name_or_nil(event), (__bridge void *) reply,
+             (unsigned long long) flags,
+             instance_encoding(self, "_decodeAndInvokeMessageWithEvent:reply:flags:"));
+    }
+    ((void (*)(id, SEL, id, id, uint64_t)) gNSXPCDecodeMessageOriginal)(
+        self, selector, event, reply, flags);
+}
+
+static id trace_nsxpc_connection_init_with_mach_service(
+    id self, SEL selector, id service_name, unsigned long long options)
+{
+    char service[161] = {};
+    copy_utf8(service_name, service, sizeof service);
+    line("event=h560_nsxpc_connection_init_enter pid=%d main=%d "
+         "service=%s options=0x%llx",
+         getpid(), pthread_main_np(), service, options);
+    id connection = ((id (*)(id, SEL, id, unsigned long long))
+        gNSXPCConnectionInitMachServiceOriginal)(
+            self, selector, service_name, options);
+    line("event=h560_nsxpc_connection_init_return pid=%d main=%d object=%p class=%s",
+         getpid(), pthread_main_np(), (__bridge void *) connection,
+         class_name_or_nil(connection));
+    return connection;
+}
+
+static id trace_nsxpc_listener_init_with_mach_service(
+    id self, SEL selector, id service_name)
+{
+    char service[161] = {};
+    copy_utf8(service_name, service, sizeof service);
+    line("event=h560_nsxpc_listener_init_enter pid=%d main=%d service=%s",
+         getpid(), pthread_main_np(), service);
+    id listener = ((id (*)(id, SEL, id))
+        gNSXPCListenerInitMachServiceOriginal)(self, selector, service_name);
+    line("event=h560_nsxpc_listener_init_return pid=%d main=%d object=%p class=%s",
+         getpid(), pthread_main_np(), (__bridge void *) listener,
+         class_name_or_nil(listener));
+    return listener;
+}
+
+static void trace_nsxpc_resume(id self, SEL selector)
+{
+    line("event=h560_nsxpc_resume_enter pid=%d main=%d object=%p class=%s",
+         getpid(), pthread_main_np(), (__bridge void *) self,
+         class_name_or_nil(self));
+    ((void (*)(id, SEL)) gNSXPCConnectionResumeOriginal)(self, selector);
+    line("event=h560_nsxpc_resume_return pid=%d main=%d object=%p",
+         getpid(), pthread_main_np(), (__bridge void *) self);
+}
+
+static void dump_chrono_classes(void)
+{
+    unsigned int class_count = 0;
+    Class *classes = objc_copyClassList(&class_count);
+    unsigned emitted_classes = 0;
+    unsigned emitted_methods = 0;
+    for (unsigned int i = 0; i < class_count && emitted_classes < 48; ++i) {
+        const char *name = class_getName(classes[i]);
+        if (!name || (!strstr(name, "CHS") && !strstr(name, "Chrono") &&
+                      !strstr(name, "CHW") && !strstr(name, "CHR"))) {
+            continue;
+        }
+        line("event=h560_chrono_class pid=%d index=%u class=%s",
+             getpid(), emitted_classes, name);
+        ++emitted_classes;
+        unsigned int method_count = 0;
+        Method *methods = class_copyMethodList(classes[i], &method_count);
+        for (unsigned int j = 0; j < method_count && emitted_methods < 96; ++j) {
+            const char *method = sel_getName(method_getName(methods[j]));
+            if (!method || (!strstr(method, "subscr") &&
+                            !strstr(method, "extension") &&
+                            !strstr(method, "server") &&
+                            !strstr(method, "connect"))) {
+                continue;
+            }
+            line("event=h560_chrono_method pid=%d class=%s selector=%s encoding=%s",
+                 getpid(), name, method, method_getTypeEncoding(methods[j]));
+            ++emitted_methods;
+        }
+        free(methods);
+    }
+    free(classes);
+    line("event=h560_chrono_class_dump pid=%d classes=%u methods=%u scanned=%u",
+         getpid(), emitted_classes, emitted_methods, class_count);
+}
+
+static void install_chronod_ipc_hooks(void)
+{
+    const bool sendSync = !gBSXPCSendSynchronouslyOriginal &&
+        install_instance_hook(NSClassFromString(@"BSXPCServiceConnectionMessage"),
+                              "sendSynchronouslyWithError:",
+                              (IMP) trace_bsxpc_send_synchronously,
+                              &gBSXPCSendSynchronouslyOriginal);
+    const bool decode = !gNSXPCDecodeMessageOriginal &&
+        install_instance_hook(NSClassFromString(@"NSXPCConnection"),
+                              "_decodeAndInvokeMessageWithEvent:reply:flags:",
+                              (IMP) trace_nsxpc_decode_message,
+                              &gNSXPCDecodeMessageOriginal);
+    const bool connectionInit = !gNSXPCConnectionInitMachServiceOriginal &&
+        install_instance_hook(NSClassFromString(@"NSXPCConnection"),
+                              "initWithMachServiceName:options:",
+                              (IMP) trace_nsxpc_connection_init_with_mach_service,
+                              &gNSXPCConnectionInitMachServiceOriginal);
+    const bool listenerInit = !gNSXPCListenerInitMachServiceOriginal &&
+        install_instance_hook(NSClassFromString(@"NSXPCListener"),
+                              "initWithMachServiceName:",
+                              (IMP) trace_nsxpc_listener_init_with_mach_service,
+                              &gNSXPCListenerInitMachServiceOriginal);
+    const bool resume = !gNSXPCConnectionResumeOriginal &&
+        install_instance_hook(NSClassFromString(@"NSXPCConnection"), "resume",
+                              (IMP) trace_nsxpc_resume,
+                              &gNSXPCConnectionResumeOriginal);
+    line("h560_ipc_hooks pid=%d sendSync=%d decode=%d connectionInit=%d "
+         "listenerInit=%d resume=%d active=%d/%d/%d/%d/%d",
+         getpid(), sendSync ? 1 : 0, decode ? 1 : 0, connectionInit ? 1 : 0,
+         listenerInit ? 1 : 0, resume ? 1 : 0,
+         gBSXPCSendSynchronouslyOriginal ? 1 : 0,
+         gNSXPCDecodeMessageOriginal ? 1 : 0,
+         gNSXPCConnectionInitMachServiceOriginal ? 1 : 0,
+         gNSXPCListenerInitMachServiceOriginal ? 1 : 0,
+         gNSXPCConnectionResumeOriginal ? 1 : 0);
+}
+
 static void install_h557_startup_hooks(void)
 {
     const bool completeStartup = install_instance_hook(
@@ -1745,15 +1916,37 @@ static void *h539_state_reporter(void *context __unused)
 __attribute__((constructor)) static void h481_observer_constructor(void)
 {
     const char *process = getprogname();
+    const bool springboard = process && !strncmp(process, "SpringBoard", 11);
+    const bool chronod = process && !strcmp(process, "chronod");
+    gConsoleOnly = chronod;
     line("event=h513_constructor_enter process=%s pid=%d",
          process ? process : "?", getpid());
-    if (!process || strncmp(process, "SpringBoard", 11)) {
+    if (!springboard && !chronod) {
         line("event=h513_constructor_skip process=%s pid=%d reason=process-filter",
              process ? process : "?", getpid());
         return;
     }
     line("event=h513_constructor_accepted process=%s pid=%d",
          process, getpid());
+    dlopen("/System/Library/PrivateFrameworks/BaseBoard.framework/BaseBoard",
+           RTLD_NOW);
+    dlopen("/System/Library/PrivateFrameworks/BaseBoardServices.framework/BaseBoardServices",
+           RTLD_NOW);
+    dlopen("/System/Library/PrivateFrameworks/ChronoServices.framework/ChronoServices",
+           RTLD_NOW);
+    dlopen("/System/Library/PrivateFrameworks/ChronoCore.framework/ChronoCore",
+           RTLD_NOW);
+    install_chronod_ipc_hooks();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5LL * NSEC_PER_SEC),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        install_chronod_ipc_hooks();
+        if (chronod) dump_chrono_classes();
+    });
+    if (chronod) {
+        line("observer load process=%s pid=%d build=H560",
+             process, getpid());
+        return;
+    }
     dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices",
            RTLD_NOW);
     dlopen("/System/Library/PrivateFrameworks/ManagedConfiguration.framework/ManagedConfiguration",
@@ -1762,13 +1955,11 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/PrivateFrameworks/SystemStatusServer.framework/SystemStatusServer",
            RTLD_NOW);
-    dlopen("/System/Library/PrivateFrameworks/ChronoServices.framework/ChronoServices",
-           RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H557", process, getpid());
+    line("observer load process=%s pid=%d build=H560", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

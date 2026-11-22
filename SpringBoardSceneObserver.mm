@@ -69,6 +69,7 @@ static std::terminate_handler gPreviousTerminateHandler;
 static struct sigaction gPreviousAbortAction;
 static volatile sig_atomic_t gAbortActionSaved;
 static volatile sig_atomic_t gInAbortReport;
+static void (*gOriginalObjcExceptionThrow)(id exception);
 static IMP gApplicationSharedApplication;
 static IMP gSpringBoardCompleteStartupOriginal;
 static IMP gSpringBoardUIControllerSharedOriginal;
@@ -709,6 +710,37 @@ static void trace_uncaught_exception(NSException *exception)
              index, symbol);
     }
 }
+
+extern "C" void objc_exception_throw(id exception);
+
+[[noreturn]] static void trace_objc_exception_throw(id exception)
+{
+    char name[80] = "-";
+    char reason[160] = "-";
+    copy_utf8([exception name], name, sizeof name);
+    copy_utf8([exception reason], reason, sizeof reason);
+    line_reserved(
+        "event=h580_objc_exception pid=%d main=%d class=%s name=%.72s reason=%.144s caller=%p",
+        getpid(), pthread_main_np(), class_name_or_nil(exception), name, reason,
+        __builtin_return_address(0));
+    if (!gOriginalObjcExceptionThrow) {
+        void *library = dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_LOCAL);
+        if (library) {
+            gOriginalObjcExceptionThrow =
+                (void (*)(id)) dlsym(library, "objc_exception_throw");
+        }
+    }
+    if (gOriginalObjcExceptionThrow) gOriginalObjcExceptionThrow(exception);
+    std::abort();
+}
+
+__attribute__((used, section("__DATA,__interpose")))
+static const DyldInterpose gObjcExceptionThrowInterpose[] = {
+    {
+        (const void *) trace_objc_exception_throw,
+        (const void *) objc_exception_throw,
+    },
+};
 
 static void trace_cxx_terminate()
 {
@@ -1923,7 +1955,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H579", process, getpid());
+    line("observer load process=%s pid=%d build=H580", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

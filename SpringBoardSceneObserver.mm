@@ -14,8 +14,10 @@
 #include <mach/arm/thread_status.h>
 #include <mach/thread_act.h>
 #include <sys/proc.h>
+#include <cxxabi.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <exception>
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -61,6 +63,7 @@ static bool gApplicationSceneProbeStarted;
 static bool gDidFinishReturned;
 static bool gPostDidFinishSnapshotStarted;
 static bool gH557PostRunSnapshotScheduled;
+static std::terminate_handler gPreviousTerminateHandler;
 static IMP gApplicationSharedApplication;
 static IMP gSpringBoardCompleteStartupOriginal;
 static IMP gSpringBoardUIControllerSharedOriginal;
@@ -94,6 +97,8 @@ static bool gSetupReturnSamplerStarted;
 
 static void snapshot(const char *phase, unsigned sample) __attribute__((unused));
 static void line(const char *format, ...) __attribute__((format(printf, 1, 2)));
+static void line_reserved(const char *format, ...)
+    __attribute__((format(printf, 1, 2)));
 static const char *class_name_or_nil(id object);
 static void copy_utf8(id value, char *out, size_t size);
 static void schedule_application_scene_probe(unsigned tick);
@@ -537,10 +542,10 @@ static bool connect_accelerator(void)
     return false;
 }
 
-static void emit(const char *text)
+static void emit_internal(const char *text, bool reserved)
 {
-    if (!text || gBudget == 0) return;
-    --gBudget;
+    if (!text || (!reserved && gBudget == 0)) return;
+    if (!reserved) --gBudget;
 
     if (gConsole == -2) gConsole = open("/dev/console", O_WRONLY | O_NOCTTY);
     if (gConsole >= 0) {
@@ -568,6 +573,11 @@ static void emit(const char *text)
     IOConnectCallStructMethod(gConnection, gSelector, &request, sizeof request, NULL, NULL);
 }
 
+static void emit(const char *text)
+{
+    emit_internal(text, false);
+}
+
 static void line(const char *format, ...) __attribute__((format(printf, 1, 2)));
 static void line(const char *format, ...)
 {
@@ -577,6 +587,18 @@ static void line(const char *format, ...)
     vsnprintf(text, sizeof text, format, arguments);
     va_end(arguments);
     emit(text);
+}
+
+static void line_reserved(const char *format, ...)
+    __attribute__((format(printf, 1, 2)));
+static void line_reserved(const char *format, ...)
+{
+    char text[kMaxLog + 1];
+    va_list arguments;
+    va_start(arguments, format);
+    vsnprintf(text, sizeof text, format, arguments);
+    va_end(arguments);
+    emit_internal(text, true);
 }
 
 static Method instance_method(id object, const char *name)
@@ -667,6 +689,37 @@ static void trace_uncaught_exception(NSException *exception)
         line("event=h550_uncaught_exception_frame index=%llu symbol=%.144s",
              index, symbol);
     }
+}
+
+static void trace_cxx_terminate()
+{
+    const std::type_info *type = abi::__cxa_current_exception_type();
+    char what[160] = "<no-current-exception>";
+    std::exception_ptr current = std::current_exception();
+    if (current) {
+        try {
+            std::rethrow_exception(current);
+        } catch (const std::exception &exception) {
+            const char *value = exception.what();
+            if (value && *value) {
+                snprintf(what, sizeof what, "%.144s", value);
+            } else {
+                strlcpy(what, "<empty>", sizeof what);
+            }
+        } catch (...) {
+            strlcpy(what, "<non-std-exception>", sizeof what);
+        }
+    }
+
+    line_reserved(
+        "event=h572_cxx_terminate pid=%d thread=%p main=%d type=%.96s what=%.144s",
+        getpid(), (void *) pthread_self(), pthread_main_np(),
+        type ? type->name() : "<no-type>", what);
+
+    std::terminate_handler previous = gPreviousTerminateHandler;
+    gPreviousTerminateHandler = NULL;
+    if (previous && previous != trace_cxx_terminate) previous();
+    std::abort();
 }
 
 static const char *class_name_or_nil(id object)
@@ -1736,8 +1789,9 @@ static void *h539_state_reporter(void *context __unused)
 {
     for (unsigned interval = 1; interval <= 40; ++interval) {
         sleep(30);
-        line("ls_installer sample=%u state=0x%x",
-             interval * 30, h539_installer_state());
+        line_reserved("event=h572_observer_alive sample=%u pid=%d main=%d ls=0x%x",
+                      interval * 30, getpid(), pthread_main_np(),
+                      h539_installer_state());
     }
     return NULL;
 }
@@ -1754,6 +1808,9 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     }
     line("event=h513_constructor_accepted process=%s pid=%d",
          process, getpid());
+    gPreviousTerminateHandler = std::set_terminate(trace_cxx_terminate);
+    line_reserved("event=h572_observer_loaded process=%s pid=%d terminate=%d",
+                  process, getpid(), gPreviousTerminateHandler ? 1 : 0);
     dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices",
            RTLD_NOW);
     dlopen("/System/Library/PrivateFrameworks/ManagedConfiguration.framework/ManagedConfiguration",
@@ -1768,7 +1825,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H557", process, getpid());
+    line("observer load process=%s pid=%d build=H572", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 
@@ -1776,6 +1833,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     if (pthread_create(&reporter, NULL, h539_state_reporter, NULL) == 0) {
         (void) pthread_detach(reporter);
     } else {
-        line("ls_installer reporter thread failed");
+        line_reserved("event=h572_observer_alive_thread_failed pid=%d",
+                      getpid());
     }
 }

@@ -416,6 +416,7 @@ static id trace_ac_activity_authorization_init(id self, SEL selector)
 static id trace_sbhiconmanager_localized_folder_name(
     id self, SEL selector, id displayName)
 {
+    (void)selector;
     line("event=h588_folder_name_localization_bypass pid=%d main=%d object=%p name=%.112s",
          getpid(), pthread_main_np(), (__bridge void *) self,
          displayName ? [(NSString *)displayName UTF8String] : "-");

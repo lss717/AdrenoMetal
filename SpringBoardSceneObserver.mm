@@ -60,7 +60,13 @@ static bool gVisibilitySnapshotScheduled;
 static bool gApplicationSceneProbeStarted;
 static bool gDidFinishReturned;
 static bool gPostDidFinishSnapshotStarted;
+static bool gH557PostRunSnapshotScheduled;
 static IMP gApplicationSharedApplication;
+static IMP gSpringBoardCompleteStartupOriginal;
+static IMP gSpringBoardUIControllerSharedOriginal;
+static IMP gSpringBoardIconControllerInitOriginal;
+static IMP gChronoServicesSubscribeOriginal;
+static IMP gApplicationRunOriginal;
 static IMP gSpringBoardApplicationDidFinishLaunching;
 static IMP gSpringBoardStartSystemStatusServer;
 static IMP gMCProfileConnectionWaitForMigration;
@@ -93,6 +99,7 @@ static void copy_utf8(id value, char *out, size_t size);
 static void schedule_application_scene_probe(unsigned tick);
 static void log_application_scene_state(const char *phase);
 static void snapshot_windows(const char *scope, id owner, unsigned sample);
+static void schedule_h557_post_run_snapshot(void);
 
 static BOOL trace_by_setup_assistant_needs_to_run(void)
 {
@@ -169,6 +176,62 @@ static void trace_springboard_application_did_finish(
             line("event=h556_post_did_finish_snapshot_exit pid=%d", getpid());
         });
     }
+}
+
+static void trace_springboard_complete_startup(id self, SEL selector, id scene)
+{
+    line("event=h557_complete_startup_enter pid=%d thread=%p main=%d scene=%p",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) scene);
+    ((void (*)(id, SEL, id)) gSpringBoardCompleteStartupOriginal)(
+        self, selector, scene);
+    line("event=h557_complete_startup_return pid=%d thread=%p main=%d",
+         getpid(), (void *) pthread_self(), pthread_main_np());
+}
+
+static id trace_springboard_ui_controller_shared(id self, SEL selector)
+{
+    line("event=h557_ui_controller_shared_enter pid=%d main=%d",
+         getpid(), pthread_main_np());
+    id controller = ((id (*)(id, SEL)) gSpringBoardUIControllerSharedOriginal)(
+        self, selector);
+    line("event=h557_ui_controller_shared_return pid=%d main=%d object=%p class=%s",
+         getpid(), pthread_main_np(), (__bridge void *) controller,
+         class_name_or_nil(controller));
+    return controller;
+}
+
+static id trace_springboard_icon_controller_init(
+    id self, SEL selector, id scene)
+{
+    line("event=h557_icon_controller_init_enter pid=%d main=%d scene=%p",
+         getpid(), pthread_main_np(), (__bridge void *) scene);
+    id controller = ((id (*)(id, SEL, id))
+        gSpringBoardIconControllerInitOriginal)(self, selector, scene);
+    line("event=h557_icon_controller_init_return pid=%d main=%d object=%p class=%s",
+         getpid(), pthread_main_np(), (__bridge void *) controller,
+         class_name_or_nil(controller));
+    return controller;
+}
+
+static void trace_chrono_services_subscribe(id self, SEL selector)
+{
+    line("event=h557_chrono_subscribe_enter pid=%d main=%d object=%p",
+         getpid(), pthread_main_np(), (__bridge void *) self);
+    ((void (*)(id, SEL)) gChronoServicesSubscribeOriginal)(self, selector);
+    line("event=h557_chrono_subscribe_return pid=%d main=%d object=%p",
+         getpid(), pthread_main_np(), (__bridge void *) self);
+}
+
+static void trace_application_run(id self, SEL selector)
+{
+    line("event=h557_ui_run_enter pid=%d thread=%p main=%d",
+         getpid(), (void *) pthread_self(), pthread_main_np());
+    gDidFinishReturned = true;
+    schedule_h557_post_run_snapshot();
+    ((void (*)(id, SEL)) gApplicationRunOriginal)(self, selector);
+    line("event=h557_ui_run_return pid=%d thread=%p main=%d",
+         getpid(), (void *) pthread_self(), pthread_main_np());
 }
 
 static void trace_springboard_start_system_status_server(id self, SEL selector)
@@ -1345,6 +1408,36 @@ static void install_ca_event_hooks(void)
          setupManagerInitObserved ? 1 : 0);
 }
 
+static void install_h557_startup_hooks(void)
+{
+    const bool completeStartup = install_instance_hook(
+        NSClassFromString(@"SpringBoard"),
+        "_completeStartupAfterMainSceneConnect:",
+        (IMP) trace_springboard_complete_startup,
+        &gSpringBoardCompleteStartupOriginal);
+    const bool uiControllerShared = install_class_hook(
+        NSClassFromString(@"SBUIController"), "sharedInstance",
+        (IMP) trace_springboard_ui_controller_shared,
+        &gSpringBoardUIControllerSharedOriginal);
+    const bool iconControllerInit = install_instance_hook(
+        NSClassFromString(@"SBIconController"),
+        "initWithMainDisplayWindowScene:",
+        (IMP) trace_springboard_icon_controller_init,
+        &gSpringBoardIconControllerInitOriginal);
+    const bool chronoSubscribe = install_instance_hook(
+        NSClassFromString(@"CHSChronoServicesConnection"),
+        "_subscribeToExtensions",
+        (IMP) trace_chrono_services_subscribe,
+        &gChronoServicesSubscribeOriginal);
+    const bool applicationRun = install_instance_hook(
+        NSClassFromString(@"UIApplication"), "_run",
+        (IMP) trace_application_run, &gApplicationRunOriginal);
+    line("h557_startup_hooks pid=%d complete=%d uiShared=%d iconInit=%d chronoSubscribe=%d appRun=%d",
+         getpid(), completeStartup ? 1 : 0, uiControllerShared ? 1 : 0,
+         iconControllerInit ? 1 : 0, chronoSubscribe ? 1 : 0,
+         applicationRun ? 1 : 0);
+}
+
 static void install_application_notifications(void)
 {
     if (gDidFinishLaunchingObserver) return;
@@ -1479,6 +1572,36 @@ static void snapshot_windows(const char *scope, id owner, unsigned sample)
             windows, @selector(objectAtIndex:), index);
         if (window) snapshot_window(scope, (unsigned) index, window, sample);
     }
+}
+
+static void h557_capture_post_run_state(const char *phase)
+{
+    Class applicationClass = NSClassFromString(@"UIApplication");
+    id application = applicationClass
+        ? ((id (*)(id, SEL)) objc_msgSend)(
+              (id) applicationClass, @selector(sharedApplication))
+        : nil;
+    line("event=h557_post_run_snapshot phase=%s pid=%d main=%d app=%d",
+         phase, getpid(), pthread_main_np(), application ? 1 : 0);
+    gViewBudget = 48;
+    gLayerBudget = 160;
+    gHostContextCount = 0;
+    snapshot_windows(phase, application, 5);
+    log_application_scene_state(phase);
+}
+
+static void schedule_h557_post_run_snapshot(void)
+{
+    if (gH557PostRunSnapshotScheduled) return;
+    gH557PostRunSnapshotScheduled = true;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1LL * NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{
+        h557_capture_post_run_state("h557_ui_run_plus_1");
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{
+        h557_capture_post_run_state("h557_ui_run_plus_30");
+    });
 }
 
 static void snapshot(const char *phase, unsigned sample)
@@ -1639,10 +1762,13 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/PrivateFrameworks/SystemStatusServer.framework/SystemStatusServer",
            RTLD_NOW);
+    dlopen("/System/Library/PrivateFrameworks/ChronoServices.framework/ChronoServices",
+           RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
+    install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H556", process, getpid());
+    line("observer load process=%s pid=%d build=H557", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

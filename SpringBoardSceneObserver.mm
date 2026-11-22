@@ -73,6 +73,7 @@ static IMP gApplicationControllerInitOriginal;
 static IMP gApplicationLibraryInstalledApplicationOriginal;
 static IMP gApplicationLibraryInstalledApplicationsOriginal;
 static IMP gApplicationLibraryAllInstalledApplicationsOriginal;
+static IMP gMutableSetRemoveObjectOriginal;
 static id gObservedApplication;
 static id gDidFinishLaunchingObserver;
 static id gWillEnterForegroundObserver;
@@ -389,6 +390,18 @@ static id trace_application_library_all_installed_applications(id self, SEL sele
          getpid(), (void *) pthread_self(), pthread_main_np(),
          (__bridge void *) applications, class_name_or_nil(applications));
     return applications;
+}
+
+static void trace_mutable_set_remove_object(id self, SEL selector, id object)
+{
+    if (!object) {
+        line("event=h554_mutable_set_remove_nil_ignored pid=%d thread=%p main=%d set=%p class=%s",
+             getpid(), (void *) pthread_self(), pthread_main_np(),
+             (__bridge void *) self, class_name_or_nil(self));
+        return;
+    }
+    ((void (*)(id, SEL, id)) gMutableSetRemoveObjectOriginal)(
+        self, selector, object);
 }
 
 extern "C" {
@@ -1217,6 +1230,9 @@ static void install_ca_event_hooks(void)
         applicationLibrary, "allInstalledApplications",
         (IMP) trace_application_library_all_installed_applications,
         &gApplicationLibraryAllInstalledApplicationsOriginal);
+    const bool mutableSetNilRemovalIgnored = install_instance_hook(
+        NSClassFromString(@"NSMutableSet"), "removeObject:",
+        (IMP) trace_mutable_set_remove_object, &gMutableSetRemoveObjectOriginal);
     line("h550_hud_hooks pid=%d setupHUD=%d soundShared=%d soundInit=%d ringerInit=%d",
          getpid(), setupHUDObserved ? 1 : 0, soundSharedObserved ? 1 : 0,
          soundInitObserved ? 1 : 0, ringerInitObserved ? 1 : 0);
@@ -1231,6 +1247,8 @@ static void install_ca_event_hooks(void)
          installedApplicationObserved ? 1 : 0,
          installedApplicationsObserved ? 1 : 0,
          allInstalledApplicationsObserved ? 1 : 0);
+    line("h554_mutable_set_remove_guard pid=%d installed=%d", getpid(),
+         mutableSetNilRemovalIgnored ? 1 : 0);
     line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contextRemote=%d contents=%d commit=%d flush=%d windowHidden=%d windowMakeVisible=%d windowSceneVisible=%d applicationShared=%d springboardStatusServerObserved=%d springboardDidFinish=%d mcWaitForMigrationSkipped=%d mcShouldShowCloudConfigurationUISkipped=%d setupManagerInitObserved=%d",
          getpid(), hostId ? 1 : 0, hostVisible ? 1 : 0, contextLayer ? 1 : 0,
          contextRemote ? 1 : 0, contents ? 1 : 0, commit ? 1 : 0,
@@ -1539,7 +1557,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H553", process, getpid());
+    line("observer load process=%s pid=%d build=H554", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

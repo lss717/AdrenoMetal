@@ -223,8 +223,9 @@ static void trace_chrono_services_subscribe(id self, SEL selector)
 {
     line("event=h557_chrono_subscribe_enter pid=%d main=%d object=%p",
          getpid(), pthread_main_np(), (__bridge void *) self);
-    ((void (*)(id, SEL)) gChronoServicesSubscribeOriginal)(self, selector);
-    line("event=h557_chrono_subscribe_return pid=%d main=%d object=%p",
+    line("event=h574_chrono_subscribe_skip pid=%d main=%d object=%p",
+         getpid(), pthread_main_np(), (__bridge void *) self);
+    line("event=h557_chrono_subscribe_return pid=%d main=%d object=%p skipped=1",
          getpid(), pthread_main_np(), (__bridge void *) self);
 }
 
@@ -1825,7 +1826,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H572", process, getpid());
+    line("observer load process=%s pid=%d build=H574", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

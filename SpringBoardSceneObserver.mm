@@ -105,6 +105,7 @@ static IMP gACActivityCenterObserveReducedPushBudgetOriginal;
 static IMP gACActivityCenterIsActivityActiveOriginal;
 static IMP gACActivityCenterAreActivitiesEnabledOriginal;
 static IMP gACActivityAuthorizationInitOriginal;
+static IMP gSBHIconManagerLocalizedFolderNameOriginal;
 static id gObservedApplication;
 static id gDidFinishLaunchingObserver;
 static id gWillEnterForegroundObserver;
@@ -410,6 +411,15 @@ static id trace_ac_activity_authorization_init(id self, SEL selector)
          getpid(), pthread_main_np(), (__bridge void *) object,
          class_name_or_nil(object));
     return object;
+}
+
+static id trace_sbhiconmanager_localized_folder_name(
+    id self, SEL selector, id displayName)
+{
+    line("event=h588_folder_name_localization_bypass pid=%d main=%d object=%p name=%.112s",
+         getpid(), pthread_main_np(), (__bridge void *) self,
+         displayName ? [(NSString *)displayName UTF8String] : "-");
+    return displayName;
 }
 
 static void trace_application_run(id self, SEL selector)
@@ -1826,6 +1836,11 @@ static void install_h557_startup_hooks(void)
         activityAuthorization, "init",
         (IMP) trace_ac_activity_authorization_init,
         &gACActivityAuthorizationInitOriginal);
+    const bool folderNameLocalizationObserved = install_instance_hook(
+        NSClassFromString(@"SBHIconManager"),
+        "localizedFolderNameForDefaultDisplayName:",
+        (IMP) trace_sbhiconmanager_localized_folder_name,
+        &gSBHIconManagerLocalizedFolderNameOriginal);
     line("h557_startup_hooks pid=%d complete=%d uiShared=%d iconInit=%d chronoSubscribe=%d appRun=%d",
          getpid(), completeStartup ? 1 : 0, uiControllerShared ? 1 : 0,
          iconControllerInit ? 1 : 0, chronoSubscribe ? 1 : 0,
@@ -1839,6 +1854,8 @@ static void install_h557_startup_hooks(void)
          activityReducedPushBudgetObserved ? 1 : 0,
          activityIsActiveObserved ? 1 : 0, activitiesEnabledObserved ? 1 : 0,
          activityAuthorizationInitObserved ? 1 : 0);
+    line("event=h588_folder_name_localization_hook pid=%d installed=%d",
+         getpid(), folderNameLocalizationObserved ? 1 : 0);
 }
 
 static void install_application_notifications(void)
@@ -2179,7 +2196,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H587", process, getpid());
+    line("observer load process=%s pid=%d build=H588", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

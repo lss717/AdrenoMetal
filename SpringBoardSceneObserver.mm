@@ -20,11 +20,13 @@
 #include <exception>
 #include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ucontext.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -64,6 +66,9 @@ static bool gDidFinishReturned;
 static bool gPostDidFinishSnapshotStarted;
 static bool gH557PostRunSnapshotScheduled;
 static std::terminate_handler gPreviousTerminateHandler;
+static struct sigaction gPreviousAbortAction;
+static volatile sig_atomic_t gAbortActionSaved;
+static volatile sig_atomic_t gInAbortReport;
 static IMP gApplicationSharedApplication;
 static IMP gSpringBoardCompleteStartupOriginal;
 static IMP gSpringBoardUIControllerSharedOriginal;
@@ -101,6 +106,9 @@ static void line_reserved(const char *format, ...)
     __attribute__((format(printf, 1, 2)));
 static const char *class_name_or_nil(id object);
 static void copy_utf8(id value, char *out, size_t size);
+static void trace_uncaught_exception(NSException *exception);
+static void trace_cxx_terminate();
+static void rearm_exception_reporters(const char *site);
 static void schedule_application_scene_probe(unsigned tick);
 static void log_application_scene_state(const char *phase);
 static void snapshot_windows(const char *scope, id owner, unsigned sample);
@@ -222,6 +230,7 @@ static id trace_springboard_icon_controller_init(
 static void trace_chrono_services_subscribe(id self, SEL selector)
 {
     (void)selector;
+    rearm_exception_reporters("chrono");
     line("event=h557_chrono_subscribe_enter pid=%d main=%d object=%p",
          getpid(), pthread_main_np(), (__bridge void *) self);
     line("event=h577_chrono_subscribe_skip pid=%d main=%d object=%p",
@@ -722,6 +731,60 @@ static void trace_cxx_terminate()
     gPreviousTerminateHandler = NULL;
     if (previous && previous != trace_cxx_terminate) previous();
     std::abort();
+}
+
+static void trace_abort_signal(int number, siginfo_t *info, void *context)
+{
+    if (gInAbortReport) {
+        signal(number, SIG_DFL);
+        raise(number);
+        _exit(128 + number);
+    }
+    gInAbortReport = 1;
+    ucontext_t *state = (ucontext_t *) context;
+    unsigned long long pc = state ? (unsigned long long) state->uc_mcontext->__ss.__pc : 0;
+    unsigned long long lr = state ? (unsigned long long) state->uc_mcontext->__ss.__lr : 0;
+    unsigned long long sp = state ? (unsigned long long) state->uc_mcontext->__ss.__sp : 0;
+    unsigned long long fp = state ? (unsigned long long) state->uc_mcontext->__ss.__fp : 0;
+    line_reserved(
+        "event=h578_abort_signal pid=%d number=%d addr=%p pc=0x%llx lr=0x%llx sp=0x%llx fp=0x%llx",
+        getpid(), number, info ? info->si_addr : NULL, pc, lr, sp, fp);
+    for (unsigned depth = 0; depth < 16 && fp; ++depth) {
+        const unsigned long long *frame = (const unsigned long long *) (uintptr_t) fp;
+        unsigned long long next = frame ? frame[0] : 0;
+        unsigned long long ret = frame ? frame[1] : 0;
+        line_reserved("event=h578_abort_frame index=%u fp=0x%llx ret=0x%llx",
+                      depth, fp, ret);
+        if ((next & 7) || (sp && (next < sp || next - sp > 0x40000))) break;
+        fp = next;
+    }
+    if (gAbortActionSaved) {
+        sigaction(number, &gPreviousAbortAction, NULL);
+    } else {
+        signal(number, SIG_DFL);
+    }
+    raise(number);
+    _exit(128 + number);
+}
+
+static void rearm_exception_reporters(const char *site)
+{
+    gPreviousTerminateHandler = std::set_terminate(trace_cxx_terminate);
+    NSSetUncaughtExceptionHandler(trace_uncaught_exception);
+    if (!gAbortActionSaved) {
+        struct sigaction action;
+        memset(&action, 0, sizeof action);
+        action.sa_sigaction = trace_abort_signal;
+        action.sa_flags = SA_SIGINFO | SA_NODEFER;
+        if (sigaction(SIGABRT, NULL, &gPreviousAbortAction) == 0) {
+            gAbortActionSaved = 1;
+        }
+        sigaction(SIGABRT, &action, NULL);
+    }
+    line_reserved(
+        "event=h578_exception_reporters_rearmed pid=%d main=%d site=%s terminate=%d abort_saved=%d",
+        getpid(), pthread_main_np(), site ? site : "?",
+        gPreviousTerminateHandler ? 1 : 0, gAbortActionSaved ? 1 : 0);
 }
 
 [[noreturn]] static void h575_cxa_throw(
@@ -1846,7 +1909,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H577", process, getpid());
+    line("observer load process=%s pid=%d build=H578", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

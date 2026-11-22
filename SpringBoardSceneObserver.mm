@@ -331,7 +331,14 @@ static id trace_ac_activity_center_init(id self, SEL selector)
 {
     line("event=h585_activity_center_init_enter pid=%d main=%d", getpid(),
          pthread_main_np());
-    id object = ((id (*)(id, SEL)) gACActivityCenterInitOriginal)(self, selector);
+    line("event=h587_activity_center_service_skip pid=%d main=%d", getpid(),
+         pthread_main_np());
+    struct objc_super superInfo = {
+        .receiver = self,
+        .super_class = object_getClass(self),
+    };
+    id object = ((id (*)(struct objc_super *, SEL))
+        objc_msgSendSuper2)(&superInfo, selector);
     line("event=h585_activity_center_init_return pid=%d main=%d object=%p class=%s",
          getpid(), pthread_main_np(), (__bridge void *) object,
          class_name_or_nil(object));
@@ -2171,7 +2178,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H586", process, getpid());
+    line("observer load process=%s pid=%d build=H587", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

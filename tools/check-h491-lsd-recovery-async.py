@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static checks for the H491 lsd journal-recovery async shim."""
+"""Static checks for the H536 lsd journal-recovery retry shim."""
 
 from pathlib import Path
 
@@ -19,10 +19,12 @@ def main() -> int:
         'strncmp(process, "lsd", 3)',
         '"_LSInstallProgressService"',
         '"performJournalRecovery"',
-        'lsd_line("recovery skipped pid=%d", getpid())',
-        "method_setImplementation(method, (IMP) h491_recovery_skip)",
+        'h536_line("recovery skipped pid=%d", getpid())',
+        "method_setImplementation(method, (IMP) h536_recovery_skip)",
+        "pthread_create(&worker, NULL, h536_recovery_worker",
+        "install_recovery_skip",
         "recovery skip installed",
-        "recovery method missing",
+        "recovery install failed",
     ):
         require(marker in text, "missing shim marker: " + marker)
     for forbidden in (
@@ -36,7 +38,7 @@ def main() -> int:
         "NativeLegacyDisplay",
     ):
         require(forbidden not in text, "shim exceeds its single operation: " + forbidden)
-    print("H491 lsd recovery async gate: PASS")
+    print("H536 lsd recovery retry gate: PASS")
     return 0
 
 

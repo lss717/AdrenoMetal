@@ -106,6 +106,7 @@ static IMP gACActivityCenterIsActivityActiveOriginal;
 static IMP gACActivityCenterAreActivitiesEnabledOriginal;
 static IMP gACActivityAuthorizationInitOriginal;
 static IMP gSBHIconManagerLocalizedFolderNameOriginal;
+static IMP gSBHIconManagerDefaultWidgetIntentOriginal;
 static id gObservedApplication;
 static id gDidFinishLaunchingObserver;
 static id gWillEnterForegroundObserver;
@@ -421,6 +422,19 @@ static id trace_sbhiconmanager_localized_folder_name(
          getpid(), pthread_main_np(), (__bridge void *) self,
          displayName ? [(NSString *)displayName UTF8String] : "-");
     return displayName;
+}
+
+static void trace_sbhiconmanager_default_widget_intent(
+    id self, SEL selector, id widget, id icon, id viewController)
+{
+    (void)selector;
+    (void)widget;
+    (void)icon;
+    (void)viewController;
+    line("event=h589_default_widget_intent_skip pid=%d main=%d object=%p widget=%p icon=%p controller=%p",
+         getpid(), pthread_main_np(), (__bridge void *) self,
+         (__bridge void *) widget, (__bridge void *) icon,
+         (__bridge void *) viewController);
 }
 
 static void trace_application_run(id self, SEL selector)
@@ -1842,6 +1856,11 @@ static void install_h557_startup_hooks(void)
         "localizedFolderNameForDefaultDisplayName:",
         (IMP) trace_sbhiconmanager_localized_folder_name,
         &gSBHIconManagerLocalizedFolderNameOriginal);
+    const bool defaultWidgetIntentObserved = install_instance_hook(
+        NSClassFromString(@"SBHIconManager"),
+        "_loadAndSaveDefaultIntentIfNecessaryForWidget:ofIcon:viewController:",
+        (IMP) trace_sbhiconmanager_default_widget_intent,
+        &gSBHIconManagerDefaultWidgetIntentOriginal);
     line("h557_startup_hooks pid=%d complete=%d uiShared=%d iconInit=%d chronoSubscribe=%d appRun=%d",
          getpid(), completeStartup ? 1 : 0, uiControllerShared ? 1 : 0,
          iconControllerInit ? 1 : 0, chronoSubscribe ? 1 : 0,
@@ -1857,6 +1876,8 @@ static void install_h557_startup_hooks(void)
          activityAuthorizationInitObserved ? 1 : 0);
     line("event=h588_folder_name_localization_hook pid=%d installed=%d",
          getpid(), folderNameLocalizationObserved ? 1 : 0);
+    line("event=h589_default_widget_intent_hook pid=%d installed=%d",
+         getpid(), defaultWidgetIntentObserved ? 1 : 0);
 }
 
 static void install_application_notifications(void)
@@ -2197,7 +2218,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H588", process, getpid());
+    line("observer load process=%s pid=%d build=H589", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

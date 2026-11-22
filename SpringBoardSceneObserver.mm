@@ -61,6 +61,10 @@ static IMP gSpringBoardStartSystemStatusServer;
 static IMP gMCProfileConnectionWaitForMigration;
 static IMP gMCProfileConnectionShouldShowCloudConfigurationUI;
 static IMP gSpringBoardSetupManagerInitOriginal;
+static IMP gSpringBoardSetupHUDOriginal;
+static IMP gSoundControllerSharedInstanceOriginal;
+static IMP gSoundControllerInitOriginal;
+static IMP gRingerControlInitOriginal;
 static id gObservedApplication;
 static id gDidFinishLaunchingObserver;
 static id gWillEnterForegroundObserver;
@@ -199,6 +203,58 @@ static void start_setup_return_sampler(void)
     } else {
         line("event=h549_setup_return_sampler_start_failed pid=%d", getpid());
     }
+}
+
+static void trace_springboard_setup_hud(id self, SEL selector)
+{
+    line("event=h550_setup_hud_enter pid=%d thread=%p main=%d object=%p",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) self);
+    ((void (*)(id, SEL)) gSpringBoardSetupHUDOriginal)(self, selector);
+    line("event=h550_setup_hud_return pid=%d thread=%p main=%d object=%p",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) self);
+}
+
+static id trace_sound_controller_shared_instance(id self, SEL selector)
+{
+    line("event=h550_sound_shared_enter pid=%d thread=%p main=%d receiver=%s",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         class_name_or_nil(self));
+    id controller = ((id (*)(id, SEL)) gSoundControllerSharedInstanceOriginal)(
+        self, selector);
+    line("event=h550_sound_shared_return pid=%d thread=%p main=%d object=%p class=%s",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) controller, class_name_or_nil(controller));
+    return controller;
+}
+
+static id trace_sound_controller_init(id self, SEL selector)
+{
+    line("event=h550_sound_init_enter pid=%d thread=%p main=%d object=%p",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) self);
+    id controller = ((id (*)(id, SEL)) gSoundControllerInitOriginal)(
+        self, selector);
+    line("event=h550_sound_init_return pid=%d thread=%p main=%d object=%p",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) controller);
+    return controller;
+}
+
+static id trace_ringer_control_init(id self, SEL selector,
+                                    id bannerManager, id soundController)
+{
+    line("event=h550_ringer_init_enter pid=%d thread=%p main=%d object=%p banner=%p sound=%p",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) self, (__bridge void *) bannerManager,
+         (__bridge void *) soundController);
+    id control = ((id (*)(id, SEL, id, id)) gRingerControlInitOriginal)(
+        self, selector, bannerManager, soundController);
+    line("event=h550_ringer_init_return pid=%d thread=%p main=%d object=%p",
+         getpid(), (void *) pthread_self(), pthread_main_np(),
+         (__bridge void *) control);
+    return control;
 }
 
 static id trace_springboard_setup_manager_init(id self, SEL selector)
@@ -354,6 +410,25 @@ static void copy_description(id value, char *out, size_t size)
         }
     }
     snprintf(out, size, "<%s>", object_getClassName(value));
+}
+
+static void trace_uncaught_exception(NSException *exception)
+{
+    char name[80];
+    char reason[160];
+    copy_utf8([exception name], name, sizeof name);
+    copy_utf8([exception reason], reason, sizeof reason);
+    line("event=h550_uncaught_exception pid=%d name=%.72s reason=%.144s",
+         getpid(), name, reason);
+
+    NSArray<NSString *> *symbols = [exception callStackSymbols];
+    unsigned long long count = symbols ? [symbols count] : 0;
+    for (unsigned long long index = 0; index < count && index < 24; ++index) {
+        char symbol[160];
+        copy_utf8([symbols objectAtIndex:index], symbol, sizeof symbol);
+        line("event=h550_uncaught_exception_frame index=%llu symbol=%.144s",
+             index, symbol);
+    }
 }
 
 static const char *class_name_or_nil(id object)
@@ -973,7 +1048,22 @@ static void install_ca_event_hooks(void)
     const bool setupManagerInitObserved = install_instance_hook(
         setupManager, "init", (IMP) trace_springboard_setup_manager_init,
         &gSpringBoardSetupManagerInitOriginal);
-    line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contextRemote=%d contents=%d commit=%d flush=%d windowHidden=%d windowMakeVisible=%d windowSceneVisible=%d applicationShared=%d springboardStatusServerSkipped=%d springboardDidFinish=%d mcWaitForMigrationSkipped=%d mcShouldShowCloudConfigurationUISkipped=%d setupManagerInitObserved=%d",
+    const bool setupHUDObserved = install_instance_hook(
+        springboard, "_setUpHUDControllerAndFriends",
+        (IMP) trace_springboard_setup_hud, &gSpringBoardSetupHUDOriginal);
+    Class soundController = NSClassFromString(@"SBSoundController");
+    const bool soundSharedObserved = install_class_hook(
+        soundController, "sharedInstance",
+        (IMP) trace_sound_controller_shared_instance,
+        &gSoundControllerSharedInstanceOriginal);
+    const bool soundInitObserved = install_instance_hook(
+        soundController, "init", (IMP) trace_sound_controller_init,
+        &gSoundControllerInitOriginal);
+    Class ringerControl = NSClassFromString(@"SBRingerControl");
+    const bool ringerInitObserved = install_instance_hook(
+        ringerControl, "initWithBannerManager:soundController:",
+        (IMP) trace_ringer_control_init, &gRingerControlInitOriginal);
+    line("ca_event_hooks pid=%d hostId=%d hostVisible=%d contextLayer=%d contextRemote=%d contents=%d commit=%d flush=%d windowHidden=%d windowMakeVisible=%d windowSceneVisible=%d applicationShared=%d springboardStatusServerSkipped=%d springboardDidFinish=%d mcWaitForMigrationSkipped=%d mcShouldShowCloudConfigurationUISkipped=%d setupManagerInitObserved=%d setupHUDObserved=%d soundSharedObserved=%d soundInitObserved=%d ringerInitObserved=%d",
          getpid(), hostId ? 1 : 0, hostVisible ? 1 : 0, contextLayer ? 1 : 0,
          contextRemote ? 1 : 0, contents ? 1 : 0, commit ? 1 : 0,
          flush ? 1 : 0, windowHidden ? 1 : 0, windowMakeVisible ? 1 : 0,
@@ -981,7 +1071,9 @@ static void install_ca_event_hooks(void)
          springboardStatusServerSkipped ? 1 : 0, springboardDidFinish ? 1 : 0,
          mcWaitForMigrationSkipped ? 1 : 0,
          mcShouldShowCloudConfigurationUISkipped ? 1 : 0,
-         setupManagerInitObserved ? 1 : 0);
+         setupManagerInitObserved ? 1 : 0, setupHUDObserved ? 1 : 0,
+         soundSharedObserved ? 1 : 0, soundInitObserved ? 1 : 0,
+         ringerInitObserved ? 1 : 0);
 }
 
 static void install_application_notifications(void)
@@ -1276,7 +1368,8 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
-    line("observer load process=%s pid=%d build=H549", process, getpid());
+    NSSetUncaughtExceptionHandler(trace_uncaught_exception);
+    line("observer load process=%s pid=%d build=H550", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

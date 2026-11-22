@@ -95,6 +95,15 @@ static IMP gApplicationLibraryInstalledApplicationsOriginal;
 static IMP gApplicationLibraryAllInstalledApplicationsOriginal;
 static IMP gMutableSetRemoveObjectOriginal;
 static IMP gConcreteMutableSetRemoveObjectOriginal;
+static IMP gBSServiceProxyCreateOriginal;
+static IMP gBSXPCServiceMessageSendSynchronouslyOriginal;
+static IMP gACActivityCenterInitOriginal;
+static IMP gACActivityCenterObserveDescriptorsOriginal;
+static IMP gACActivityCenterObserveContentUpdatesOriginal;
+static IMP gACActivityCenterObserveReducedPushBudgetOriginal;
+static IMP gACActivityCenterIsActivityActiveOriginal;
+static IMP gACActivityCenterAreActivitiesEnabledOriginal;
+static IMP gACActivityAuthorizationInitOriginal;
 static id gObservedApplication;
 static id gDidFinishLaunchingObserver;
 static id gWillEnterForegroundObserver;
@@ -270,6 +279,116 @@ static id trace_chrono_assertion(id self, SEL selector)
     line("event=h579_chrono_assertion_stub pid=%d main=%d object=%p",
          getpid(), pthread_main_np(), (__bridge void *) self);
     return nil;
+}
+
+static id trace_bsservice_proxy_create(
+    id self, SEL selector, Protocol *protocol, Class remoteClass, id name)
+{
+    char protocolName[96];
+    char serviceName[128];
+    const char *sourceProtocol = protocol ? protocol_getName(protocol) : NULL;
+    snprintf(protocolName, sizeof protocolName, "%.88s",
+             sourceProtocol ? sourceProtocol : "-");
+    copy_utf8(name, serviceName, sizeof serviceName);
+    line("event=h585_bs_proxy_create pid=%d main=%d protocol=%.88s class=%.32s name=%.112s",
+         getpid(), pthread_main_np(), protocolName,
+         remoteClass ? class_getName(remoteClass) : "-", serviceName);
+    return ((id (*)(id, SEL, Protocol *, Class, id))
+        gBSServiceProxyCreateOriginal)(self, selector, protocol, remoteClass, name);
+}
+
+static BOOL trace_bsxpc_message_send_synchronously(
+    id self, SEL selector, id *error)
+{
+    line("event=h585_bs_message_send_sync_enter pid=%d main=%d object=%p class=%s",
+         getpid(), pthread_main_np(), (__bridge void *) self,
+         class_name_or_nil(self));
+    BOOL result = ((BOOL (*)(id, SEL, id *))
+        gBSXPCServiceMessageSendSynchronouslyOriginal)(self, selector, error);
+    id errorObject = error ? *error : nil;
+    char reason[128];
+    copy_utf8(errorObject, reason, sizeof reason);
+    line("event=h585_bs_message_send_sync_return pid=%d main=%d result=%d error=%d class=%s reason=%.112s",
+         getpid(), pthread_main_np(), result ? 1 : 0, errorObject ? 1 : 0,
+         class_name_or_nil(errorObject), reason);
+    return result;
+}
+
+static id trace_ac_activity_center_init(id self, SEL selector)
+{
+    line("event=h585_activity_center_init_enter pid=%d main=%d", getpid(),
+         pthread_main_np());
+    id object = ((id (*)(id, SEL)) gACActivityCenterInitOriginal)(self, selector);
+    line("event=h585_activity_center_init_return pid=%d main=%d object=%p class=%s",
+         getpid(), pthread_main_np(), (__bridge void *) object,
+         class_name_or_nil(object));
+    return object;
+}
+
+static void trace_ac_activity_center_observe_descriptors(
+    id self, SEL selector, id handler)
+{
+    line("event=h585_activity_center_observe_descriptors_enter pid=%d main=%d object=%p handler=%d",
+         getpid(), pthread_main_np(), (__bridge void *) self, handler ? 1 : 0);
+    ((void (*)(id, SEL, id)) gACActivityCenterObserveDescriptorsOriginal)(
+        self, selector, handler);
+    line("event=h585_activity_center_observe_descriptors_return pid=%d main=%d",
+         getpid(), pthread_main_np());
+}
+
+static void trace_ac_activity_center_observe_content_updates(
+    id self, SEL selector, id handler)
+{
+    line("event=h585_activity_center_observe_content_updates_enter pid=%d main=%d object=%p handler=%d",
+         getpid(), pthread_main_np(), (__bridge void *) self, handler ? 1 : 0);
+    ((void (*)(id, SEL, id)) gACActivityCenterObserveContentUpdatesOriginal)(
+        self, selector, handler);
+    line("event=h585_activity_center_observe_content_updates_return pid=%d main=%d",
+         getpid(), pthread_main_np());
+}
+
+static void trace_ac_activity_center_observe_reduced_push_budget(
+    id self, SEL selector, id handler)
+{
+    line("event=h585_activity_center_observe_reduced_push_budget_enter pid=%d main=%d object=%p handler=%d",
+         getpid(), pthread_main_np(), (__bridge void *) self, handler ? 1 : 0);
+    ((void (*)(id, SEL, id)) gACActivityCenterObserveReducedPushBudgetOriginal)(
+        self, selector, handler);
+    line("event=h585_activity_center_observe_reduced_push_budget_return pid=%d main=%d",
+         getpid(), pthread_main_np());
+}
+
+static BOOL trace_ac_activity_center_is_activity_active(
+    id self, SEL selector, id activity)
+{
+    BOOL result = ((BOOL (*)(id, SEL, id))
+        gACActivityCenterIsActivityActiveOriginal)(self, selector, activity);
+    line("event=h585_activity_center_is_activity_active pid=%d main=%d object=%p activity=%p result=%d",
+         getpid(), pthread_main_np(), (__bridge void *) self,
+         (__bridge void *) activity, result ? 1 : 0);
+    return result;
+}
+
+static BOOL trace_ac_activity_center_are_activities_enabled(
+    id self, SEL selector)
+{
+    BOOL result = ((BOOL (*)(id, SEL))
+        gACActivityCenterAreActivitiesEnabledOriginal)(self, selector);
+    line("event=h585_activity_center_are_activities_enabled pid=%d main=%d object=%p result=%d",
+         getpid(), pthread_main_np(), (__bridge void *) self, result ? 1 : 0);
+    return result;
+}
+
+static id trace_ac_activity_authorization_init(id self, SEL selector)
+{
+    line("event=h585_activity_authorization_init_enter pid=%d main=%d",
+         getpid(), pthread_main_np());
+    id object = ((id (*)(id, SEL))
+        gACActivityAuthorizationInitOriginal)(self, selector);
+    line("event=h585_activity_authorization_init_return pid=%d main=%d object=%p class=%s",
+         getpid(), pthread_main_np(), (__bridge void *) object,
+         class_name_or_nil(object));
+    return object;
 }
 
 static void trace_application_run(id self, SEL selector)
@@ -1648,12 +1767,57 @@ static void install_h557_startup_hooks(void)
     const bool applicationRun = install_instance_hook(
         NSClassFromString(@"UIApplication"), "_run",
         (IMP) trace_application_run, &gApplicationRunOriginal);
+    Class bsServiceProxy = NSClassFromString(@"BSXPCServiceConnectionProxy");
+    const bool bsProxyCreateObserved = install_class_hook(
+        bsServiceProxy, "createImplementationOfProtocol:forClass:withName:",
+        (IMP) trace_bsservice_proxy_create, &gBSServiceProxyCreateOriginal);
+    Class bsMessage = NSClassFromString(@"BSXPCServiceConnectionMessage");
+    const bool bsSendObserved = install_instance_hook(
+        bsMessage, "sendSynchronouslyWithError:",
+        (IMP) trace_bsxpc_message_send_synchronously,
+        &gBSXPCServiceMessageSendSynchronouslyOriginal);
+    Class activityCenter = NSClassFromString(@"ACActivityCenter");
+    const bool activityCenterInitObserved = install_instance_hook(
+        activityCenter, "init", (IMP) trace_ac_activity_center_init,
+        &gACActivityCenterInitOriginal);
+    const bool activityDescriptorsObserved = install_instance_hook(
+        activityCenter, "observeDescriptorsWithHandler:",
+        (IMP) trace_ac_activity_center_observe_descriptors,
+        &gACActivityCenterObserveDescriptorsOriginal);
+    const bool activityContentUpdatesObserved = install_instance_hook(
+        activityCenter, "observeContentUpdatesWithHandler:",
+        (IMP) trace_ac_activity_center_observe_content_updates,
+        &gACActivityCenterObserveContentUpdatesOriginal);
+    const bool activityReducedPushBudgetObserved = install_instance_hook(
+        activityCenter, "observeActivitiesExceedingReducedPushBudgetWithHandler:",
+        (IMP) trace_ac_activity_center_observe_reduced_push_budget,
+        &gACActivityCenterObserveReducedPushBudgetOriginal);
+    const bool activityIsActiveObserved = install_instance_hook(
+        activityCenter, "isActivityActive:",
+        (IMP) trace_ac_activity_center_is_activity_active,
+        &gACActivityCenterIsActivityActiveOriginal);
+    const bool activitiesEnabledObserved = install_instance_hook(
+        activityCenter, "areActivitiesEnabled",
+        (IMP) trace_ac_activity_center_are_activities_enabled,
+        &gACActivityCenterAreActivitiesEnabledOriginal);
+    Class activityAuthorization = NSClassFromString(@"ACActivityAuthorization");
+    const bool activityAuthorizationInitObserved = install_instance_hook(
+        activityAuthorization, "init",
+        (IMP) trace_ac_activity_authorization_init,
+        &gACActivityAuthorizationInitOriginal);
     line("h557_startup_hooks pid=%d complete=%d uiShared=%d iconInit=%d chronoSubscribe=%d appRun=%d",
          getpid(), completeStartup ? 1 : 0, uiControllerShared ? 1 : 0,
          iconControllerInit ? 1 : 0, chronoSubscribe ? 1 : 0,
          applicationRun ? 1 : 0);
     line("event=h579_chrono_assertion_stub_installed pid=%d class=%d added=%d",
          getpid(), chronoServicesClass ? 1 : 0, chronoAssertion ? 1 : 0);
+    line("event=h585_activity_hooks pid=%d bsProxy=%d bsSend=%d centerInit=%d descriptors=%d content=%d budget=%d active=%d enabled=%d authInit=%d",
+         getpid(), bsProxyCreateObserved ? 1 : 0, bsSendObserved ? 1 : 0,
+         activityCenterInitObserved ? 1 : 0, activityDescriptorsObserved ? 1 : 0,
+         activityContentUpdatesObserved ? 1 : 0,
+         activityReducedPushBudgetObserved ? 1 : 0,
+         activityIsActiveObserved ? 1 : 0, activitiesEnabledObserved ? 1 : 0,
+         activityAuthorizationInitObserved ? 1 : 0);
 }
 
 static void install_application_notifications(void)
@@ -1986,11 +2150,15 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/PrivateFrameworks/ChronoServices.framework/ChronoServices",
            RTLD_NOW);
+    dlopen("/System/Library/PrivateFrameworks/BoardServices.framework/BoardServices",
+           RTLD_NOW);
+    dlopen("/System/Library/Frameworks/ActivityKit.framework/ActivityKit",
+           RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H584", process, getpid());
+    line("observer load process=%s pid=%d build=H585", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

@@ -204,7 +204,7 @@ static int h539_install_methods(void)
 
     if (h539_all_methods_installed()) {
         h539_set_state(kH539InstallerDone);
-        h539_line("methods installed state=0x%x pid=%d",
+        h539_line("methods installed add=independent state=0x%x pid=%d",
                   h539_installer_state(), getpid());
         return 1;
     }

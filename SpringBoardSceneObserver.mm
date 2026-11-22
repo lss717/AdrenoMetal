@@ -36,6 +36,7 @@ extern "C" const char *getprogname(void);
 extern "C" uint32_t h539_installer_state(void);
 extern "C" BOOL BYSetupAssistantNeedsToRun(void);
 extern "C" void BYSetupAssistantPrepareLaunchSentinel(void);
+extern "C" id objc_msgSendSuper2(struct objc_super *, SEL);
 
 static const uint32_t kTunnelMagic = 0x4e544e4c; /* 'NTNL' */
 static const uint32_t kMethodLog = 17;

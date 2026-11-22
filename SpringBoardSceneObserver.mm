@@ -722,10 +722,7 @@ static void trace_cxx_terminate()
     std::abort();
 }
 
-extern "C" [[noreturn]] void __cxa_throw(
-    void *exception, std::type_info *type, void (*destructor)(void *));
-
-extern "C" [[noreturn]] static void h575_cxa_throw(
+[[noreturn]] static void h575_cxa_throw(
     void *exception, std::type_info *type, void (*destructor)(void *))
 {
     line_reserved(

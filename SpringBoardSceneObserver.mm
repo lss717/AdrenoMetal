@@ -1031,13 +1031,13 @@ static void trace_fatal_signal(int number, siginfo_t *info, void *context)
     unsigned long long sp = state ? (unsigned long long) state->uc_mcontext->__ss.__sp : 0;
     unsigned long long fp = state ? (unsigned long long) state->uc_mcontext->__ss.__fp : 0;
     line_reserved(
-        "event=h592_fatal_signal pid=%d number=%d addr=%p pc=0x%llx lr=0x%llx sp=0x%llx fp=0x%llx",
+        "event=h593_fatal_signal pid=%d number=%d addr=%p pc=0x%llx lr=0x%llx sp=0x%llx fp=0x%llx",
         getpid(), number, info ? info->si_addr : NULL, pc, lr, sp, fp);
     for (unsigned depth = 0; depth < 16 && fp; ++depth) {
         const unsigned long long *frame = (const unsigned long long *) (uintptr_t) fp;
         unsigned long long next = frame ? frame[0] : 0;
         unsigned long long ret = frame ? frame[1] : 0;
-        line_reserved("event=h592_fatal_frame index=%u fp=0x%llx ret=0x%llx",
+        line_reserved("event=h593_fatal_frame index=%u fp=0x%llx ret=0x%llx",
                       depth, fp, ret);
         if ((next & 7) || (sp && (next < sp || next - sp > 0x40000))) break;
         fp = next;
@@ -1053,20 +1053,8 @@ static void trace_fatal_signal(int number, siginfo_t *info, void *context)
     _exit(128 + number);
 }
 
-static void rearm_exception_reporters(const char *site)
+static void install_fatal_signal_reporters(void)
 {
-    gPreviousTerminateHandler = std::set_terminate(trace_cxx_terminate);
-    NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    if (!gAbortActionSaved) {
-        struct sigaction action;
-        memset(&action, 0, sizeof action);
-        action.sa_sigaction = trace_abort_signal;
-        action.sa_flags = SA_SIGINFO | SA_NODEFER;
-        if (sigaction(SIGABRT, NULL, &gPreviousAbortAction) == 0) {
-            gAbortActionSaved = 1;
-        }
-        sigaction(SIGABRT, &action, NULL);
-    }
     if (!gSegvActionSaved) {
         struct sigaction action;
         memset(&action, 0, sizeof action);
@@ -1087,13 +1075,31 @@ static void rearm_exception_reporters(const char *site)
         }
         sigaction(SIGILL, &action, NULL);
     }
+    line_reserved("event=h593_signal_hooks pid=%d segv=%d ill=%d",
+                  getpid(), gSegvActionSaved ? 1 : 0, gIllActionSaved ? 1 : 0);
+}
+
+static void rearm_exception_reporters(const char *site)
+{
+    gPreviousTerminateHandler = std::set_terminate(trace_cxx_terminate);
+    NSSetUncaughtExceptionHandler(trace_uncaught_exception);
+    if (!gAbortActionSaved) {
+        struct sigaction action;
+        memset(&action, 0, sizeof action);
+        action.sa_sigaction = trace_abort_signal;
+        action.sa_flags = SA_SIGINFO | SA_NODEFER;
+        if (sigaction(SIGABRT, NULL, &gPreviousAbortAction) == 0) {
+            gAbortActionSaved = 1;
+        }
+        sigaction(SIGABRT, &action, NULL);
+    }
+    install_fatal_signal_reporters();
     line_reserved(
         "event=h578_exception_reporters_rearmed pid=%d main=%d site=%s terminate=%d abort_saved=%d segv_saved=%d ill_saved=%d",
         getpid(), pthread_main_np(), site ? site : "?",
         gPreviousTerminateHandler ? 1 : 0, gAbortActionSaved ? 1 : 0,
         gSegvActionSaved ? 1 : 0, gIllActionSaved ? 1 : 0);
-    line_reserved("event=h592_signal_hooks pid=%d segv=%d ill=%d",
-                  getpid(), gSegvActionSaved ? 1 : 0, gIllActionSaved ? 1 : 0);
+
 }
 
 [[noreturn]] static void h575_cxa_throw(
@@ -2312,7 +2318,8 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H592", process, getpid());
+    install_fatal_signal_reporters();
+    line("observer load process=%s pid=%d build=H593", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

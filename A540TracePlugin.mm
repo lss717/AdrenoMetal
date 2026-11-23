@@ -3254,9 +3254,13 @@ static id trace_architecture(void)
     // instance is offered again and the inventory follows if it is accepted.
     gDeviceInstance = self;
     caller("dev", "initWithAcceleratorPort:", "device=returned");
-    /* H417 is observation-only.  Never run the historical GPU self-test: it
-     * issued work on the accelerator and would make later draw/commit evidence
-     * impossible to attribute to CoreAnimation. */
+    /* H601: run the real GPU self-test once as a labelled component test (C6a
+     * first half). Its submit/fence/readback is attributed to "gpu selftest",
+     * never to CoreAnimation; CA draw/commit remain separately observed. */
+    {
+        static bool gGpuSelftestDone = false;
+        if (!gGpuSelftestDone && gConnection) { gGpuSelftestDone = true; gpu_selftest(); }
+    }
     schedule_display_probes();
     return self;
 }

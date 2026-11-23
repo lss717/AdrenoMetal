@@ -2383,9 +2383,20 @@ static int abi_call(uint32_t method, const void *input, size_t inputSize, void *
     return abi_call_rc(method, input, inputSize, output, outputSize) == KERN_SUCCESS ? 0 : -1;
 }
 
+/* H610: the A5xx PM4 type-7 header is 0x70000000 and carries odd-parity bits
+ * (H236as); the old 0xC0000000 type-3 form with no parity produced a malformed
+ * CP_MEM_WRITE that faulted the CP and poisoned every later submit. Match the
+ * kernel NativeA540C3 type7() exactly. */
+static uint32_t pm4_parity(uint32_t value)
+{
+    value ^= value >> 16; value ^= value >> 8; value ^= value >> 4;
+    value ^= value >> 2; value ^= value >> 1;
+    return (~value) & 1u;
+}
 static uint32_t pm4_type7(uint32_t opcode, uint32_t count)
 {
-    return (3u << 30) | ((opcode & 0x7fu) << 16) | (count & 0x3fffu);
+    return 0x70000000u | (count & 0x3fffu) | (pm4_parity(count) << 15) |
+           ((opcode & 0x7fu) << 16) | (pm4_parity(opcode) << 23);
 }
 
 static void __attribute__((unused)) gpu_selftest(void)

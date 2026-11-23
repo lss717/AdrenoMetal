@@ -107,6 +107,7 @@ static IMP gACActivityCenterAreActivitiesEnabledOriginal;
 static IMP gACActivityAuthorizationInitOriginal;
 static IMP gSBHIconManagerLocalizedFolderNameOriginal;
 static IMP gSBHIconManagerDefaultWidgetIntentOriginal;
+static IMP gSBHIconModelSaveStateOriginal;
 static id gObservedApplication;
 static id gDidFinishLaunchingObserver;
 static id gWillEnterForegroundObserver;
@@ -435,6 +436,13 @@ static void trace_sbhiconmanager_default_widget_intent(
          getpid(), pthread_main_np(), (__bridge void *) self,
          (__bridge void *) widget, (__bridge void *) icon,
          (__bridge void *) viewController);
+}
+
+static void trace_sbhiconmodel_save_icon_state(id self, SEL selector)
+{
+    (void)selector;
+    line("event=h590_icon_state_save_skip pid=%d main=%d object=%p",
+         getpid(), pthread_main_np(), (__bridge void *) self);
 }
 
 static void trace_application_run(id self, SEL selector)
@@ -1861,6 +1869,11 @@ static void install_h557_startup_hooks(void)
         "_loadAndSaveDefaultIntentIfNecessaryForWidget:ofIcon:viewController:",
         (IMP) trace_sbhiconmanager_default_widget_intent,
         &gSBHIconManagerDefaultWidgetIntentOriginal);
+    const bool iconStateSaveObserved = install_instance_hook(
+        NSClassFromString(@"SBHIconModel"),
+        "saveIconStateIfNeeded",
+        (IMP) trace_sbhiconmodel_save_icon_state,
+        &gSBHIconModelSaveStateOriginal);
     line("h557_startup_hooks pid=%d complete=%d uiShared=%d iconInit=%d chronoSubscribe=%d appRun=%d",
          getpid(), completeStartup ? 1 : 0, uiControllerShared ? 1 : 0,
          iconControllerInit ? 1 : 0, chronoSubscribe ? 1 : 0,
@@ -1878,6 +1891,8 @@ static void install_h557_startup_hooks(void)
          getpid(), folderNameLocalizationObserved ? 1 : 0);
     line("event=h589_default_widget_intent_hook pid=%d installed=%d",
          getpid(), defaultWidgetIntentObserved ? 1 : 0);
+    line("event=h590_icon_state_save_hook pid=%d installed=%d",
+         getpid(), iconStateSaveObserved ? 1 : 0);
 }
 
 static void install_application_notifications(void)
@@ -2218,7 +2233,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H589", process, getpid());
+    line("observer load process=%s pid=%d build=H590", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

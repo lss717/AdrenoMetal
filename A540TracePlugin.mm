@@ -2405,8 +2405,10 @@ static void __attribute__((unused)) gpu_selftest(void)
 
     NativeAdrenoAbiBoAlloc request = { 4096, 12, 0 };
     NativeAdrenoAbiBoAllocReply ib, target;
-    if (abi_call(NativeAdrenoMethodBoAlloc, &request, sizeof request, &ib, sizeof ib)) { caller("gpu", "boalloc-ib", "failed"); return; }
-    if (abi_call(NativeAdrenoMethodBoAlloc, &request, sizeof request, &target, sizeof target)) { caller("gpu", "boalloc-target", "failed"); return; }
+    uint32_t rcIb = abi_call_rc(NativeAdrenoMethodBoAlloc, &request, sizeof request, &ib, sizeof ib);
+    if (rcIb != KERN_SUCCESS) { snprintf(line, sizeof line, "rc=0x%x", rcIb); caller("gpu", "boalloc-ib", line); return; }
+    uint32_t rcTg = abi_call_rc(NativeAdrenoMethodBoAlloc, &request, sizeof request, &target, sizeof target);
+    if (rcTg != KERN_SUCCESS) { snprintf(line, sizeof line, "rc=0x%x", rcTg); caller("gpu", "boalloc-target", line); return; }
 
     const uint64_t ibIova = info.va_start;
     const uint64_t targetIova = info.va_start + 0x1000;

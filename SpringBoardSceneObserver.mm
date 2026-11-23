@@ -70,6 +70,11 @@ static std::terminate_handler gPreviousTerminateHandler;
 static struct sigaction gPreviousAbortAction;
 static volatile sig_atomic_t gAbortActionSaved;
 static volatile sig_atomic_t gInAbortReport;
+static struct sigaction gPreviousSegvAction;
+static struct sigaction gPreviousIllAction;
+static volatile sig_atomic_t gSegvActionSaved;
+static volatile sig_atomic_t gIllActionSaved;
+static volatile sig_atomic_t gInFatalSignalReport;
 static void (*gOriginalObjcExceptionThrow)(id exception);
 static IMP gApplicationSharedApplication;
 static IMP gSpringBoardCompleteStartupOriginal;
@@ -1012,6 +1017,42 @@ static void trace_abort_signal(int number, siginfo_t *info, void *context)
     _exit(128 + number);
 }
 
+static void trace_fatal_signal(int number, siginfo_t *info, void *context)
+{
+    if (gInFatalSignalReport) {
+        signal(number, SIG_DFL);
+        raise(number);
+        _exit(128 + number);
+    }
+    gInFatalSignalReport = 1;
+    ucontext_t *state = (ucontext_t *) context;
+    unsigned long long pc = state ? (unsigned long long) state->uc_mcontext->__ss.__pc : 0;
+    unsigned long long lr = state ? (unsigned long long) state->uc_mcontext->__ss.__lr : 0;
+    unsigned long long sp = state ? (unsigned long long) state->uc_mcontext->__ss.__sp : 0;
+    unsigned long long fp = state ? (unsigned long long) state->uc_mcontext->__ss.__fp : 0;
+    line_reserved(
+        "event=h592_fatal_signal pid=%d number=%d addr=%p pc=0x%llx lr=0x%llx sp=0x%llx fp=0x%llx",
+        getpid(), number, info ? info->si_addr : NULL, pc, lr, sp, fp);
+    for (unsigned depth = 0; depth < 16 && fp; ++depth) {
+        const unsigned long long *frame = (const unsigned long long *) (uintptr_t) fp;
+        unsigned long long next = frame ? frame[0] : 0;
+        unsigned long long ret = frame ? frame[1] : 0;
+        line_reserved("event=h592_fatal_frame index=%u fp=0x%llx ret=0x%llx",
+                      depth, fp, ret);
+        if ((next & 7) || (sp && (next < sp || next - sp > 0x40000))) break;
+        fp = next;
+    }
+    if (number == SIGSEGV && gSegvActionSaved) {
+        sigaction(number, &gPreviousSegvAction, NULL);
+    } else if (number == SIGILL && gIllActionSaved) {
+        sigaction(number, &gPreviousIllAction, NULL);
+    } else {
+        signal(number, SIG_DFL);
+    }
+    raise(number);
+    _exit(128 + number);
+}
+
 static void rearm_exception_reporters(const char *site)
 {
     gPreviousTerminateHandler = std::set_terminate(trace_cxx_terminate);
@@ -1026,10 +1067,33 @@ static void rearm_exception_reporters(const char *site)
         }
         sigaction(SIGABRT, &action, NULL);
     }
+    if (!gSegvActionSaved) {
+        struct sigaction action;
+        memset(&action, 0, sizeof action);
+        action.sa_sigaction = trace_fatal_signal;
+        action.sa_flags = SA_SIGINFO | SA_NODEFER;
+        if (sigaction(SIGSEGV, NULL, &gPreviousSegvAction) == 0) {
+            gSegvActionSaved = 1;
+        }
+        sigaction(SIGSEGV, &action, NULL);
+    }
+    if (!gIllActionSaved) {
+        struct sigaction action;
+        memset(&action, 0, sizeof action);
+        action.sa_sigaction = trace_fatal_signal;
+        action.sa_flags = SA_SIGINFO | SA_NODEFER;
+        if (sigaction(SIGILL, NULL, &gPreviousIllAction) == 0) {
+            gIllActionSaved = 1;
+        }
+        sigaction(SIGILL, &action, NULL);
+    }
     line_reserved(
-        "event=h578_exception_reporters_rearmed pid=%d main=%d site=%s terminate=%d abort_saved=%d",
+        "event=h578_exception_reporters_rearmed pid=%d main=%d site=%s terminate=%d abort_saved=%d segv_saved=%d ill_saved=%d",
         getpid(), pthread_main_np(), site ? site : "?",
-        gPreviousTerminateHandler ? 1 : 0, gAbortActionSaved ? 1 : 0);
+        gPreviousTerminateHandler ? 1 : 0, gAbortActionSaved ? 1 : 0,
+        gSegvActionSaved ? 1 : 0, gIllActionSaved ? 1 : 0);
+    line_reserved("event=h592_signal_hooks pid=%d segv=%d ill=%d",
+                  getpid(), gSegvActionSaved ? 1 : 0, gIllActionSaved ? 1 : 0);
 }
 
 [[noreturn]] static void h575_cxa_throw(
@@ -2248,7 +2312,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_ca_event_hooks();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
-    line("observer load process=%s pid=%d build=H591", process, getpid());
+    line("observer load process=%s pid=%d build=H592", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

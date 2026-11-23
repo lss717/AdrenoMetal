@@ -182,10 +182,12 @@ static id trace_application_shared_application(id self, SEL selector)
 static void trace_springboard_application_did_finish(
     id self, SEL selector, id notification)
 {
+    rearm_exception_reporters("did-finish-enter");
     line("event=h541_did_finish_enter pid=%d thread=%p main=%d",
          getpid(), (void *) pthread_self(), pthread_main_np());
     ((void (*)(id, SEL, id)) gSpringBoardApplicationDidFinishLaunching)(
         self, selector, notification);
+    rearm_exception_reporters("did-finish-return");
     line("event=h541_did_finish_return pid=%d thread=%p main=%d",
          getpid(), (void *) pthread_self(), pthread_main_np());
     gDidFinishReturned = true;
@@ -216,6 +218,7 @@ static void trace_springboard_application_did_finish(
 
 static void trace_springboard_complete_startup(id self, SEL selector, id scene)
 {
+    rearm_exception_reporters("complete-startup-enter");
     line("event=h557_complete_startup_enter pid=%d thread=%p main=%d scene=%p",
          getpid(), (void *) pthread_self(), pthread_main_np(),
          (__bridge void *) scene);
@@ -231,6 +234,7 @@ static void trace_springboard_complete_startup(id self, SEL selector, id scene)
             "event=h583_complete_startup_exception_caught pid=%d main=%d class=%s name=%.72s reason=%.144s",
             getpid(), pthread_main_np(), class_name_or_nil(exception), name, reason);
     }
+    rearm_exception_reporters("complete-startup-return");
     line("event=h557_complete_startup_return pid=%d thread=%p main=%d",
          getpid(), (void *) pthread_self(), pthread_main_np());
 }
@@ -460,6 +464,7 @@ static void trace_sbiconcontroller_prepare_today(id self, SEL selector)
 
 static void trace_application_run(id self, SEL selector)
 {
+    rearm_exception_reporters("ui-run-enter");
     line("event=h557_ui_run_enter pid=%d thread=%p main=%d",
          getpid(), (void *) pthread_self(), pthread_main_np());
     gDidFinishReturned = true;
@@ -2278,6 +2283,7 @@ static void *h539_state_reporter(void *context __unused)
 {
     for (unsigned interval = 1; interval <= 40; ++interval) {
         sleep(30);
+        rearm_exception_reporters("periodic");
         line_reserved("event=h572_observer_alive sample=%u pid=%d main=%d ls=0x%x",
                       interval * 30, getpid(), pthread_main_np(),
                       h539_installer_state());
@@ -2319,7 +2325,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H593", process, getpid());
+    line("observer load process=%s pid=%d build=H598", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

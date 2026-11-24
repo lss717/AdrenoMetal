@@ -2277,6 +2277,69 @@ static void snapshot(const char *phase, unsigned sample)
          sample, phase, getpid());
 }
 
+/* H639: the render server's context table has only ever been read inside backboardd, where every
+ * entry is owned by backboardd itself, so those readings cannot say whether +[CAContext
+ * allContexts] is the server's table or merely the calling process's own list.  Read the same
+ * selector here, in the desktop process.  There are then only three possible outcomes: the
+ * desktop context id seen by ca_context_set_layer appears only in this list, which means the
+ * selector is per-process and the server question needs a different probe; it appears in both,
+ * which means the server already knows the desktop context; or it appears in neither, which means
+ * the desktop context never reached the render server at all.  Read-only. */
+static void census_ca_contexts(const char *why)
+{
+    Class ctxClass = objc_getClass("CAContext");
+    if (!ctxClass) {
+        line_reserved("event=h639_ctx_census site=%s reason=no-CAContext pid=%d", why, getpid());
+        return;
+    }
+    const SEL allSel = sel_getUid("allContexts");
+    if (!((BOOL (*)(id, SEL, SEL)) objc_msgSend)((id) ctxClass, @selector(respondsToSelector:), allSel)) {
+        line_reserved("event=h639_ctx_census site=%s reason=no-allContexts pid=%d", why, getpid());
+        return;
+    }
+    id all = nil;
+    @try {
+        all = ((id (*)(id, SEL)) objc_msgSend)((id) ctxClass, allSel);
+    } @catch (id ignored) {
+        all = nil;
+    }
+    unsigned long long count = 0;
+    if (all) {
+        read_integer(all, "count", &count);
+    }
+    line_reserved("event=h639_ctx_census site=%s pid=%d count=%llu", why, getpid(), count);
+    for (unsigned long long i = 0; all && i < count && i < 12; ++i) {
+        id ctx = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(
+            all, @selector(objectAtIndex:), i);
+        if (!ctx) {
+            line_reserved("event=h639_ctx_entry site=%s pid=%d idx=%llu ctx=nil", why, getpid(), i);
+            continue;
+        }
+        unsigned long long cid = 0, did = 0, mask = 0, subs = 0;
+        read_integer(ctx, "contextId", &cid);
+        read_integer(ctx, "displayId", &did);
+        read_integer(ctx, "displayMask", &mask);
+        id layer = read_object(ctx, "layer");
+        id contents = read_object(layer, "contents");
+        id sublayers = read_object(layer, "sublayers");
+        if (sublayers) {
+            read_integer(sublayers, "count", &subs);
+        }
+        char layerClass[24] = "-";
+        char contentsClass[24] = "-";
+        if (layer) {
+            snprintf(layerClass, sizeof layerClass, "%.20s", object_getClassName(layer));
+        }
+        if (contents) {
+            snprintf(contentsClass, sizeof contentsClass, "%.20s", object_getClassName(contents));
+        }
+        line_reserved(
+            "event=h639_ctx_entry site=%s pid=%d idx=%llu id=0x%llx displayId=0x%llx mask=0x%llx "
+            "layer=%s contents=%s subs=%llu",
+            why, getpid(), i, cid, did, mask, layerClass, contentsClass, subs);
+    }
+}
+
 static void *h539_state_reporter(void *context __unused)
 {
     for (unsigned interval = 1; interval <= 40; ++interval) {
@@ -2285,6 +2348,13 @@ static void *h539_state_reporter(void *context __unused)
         line_reserved("event=h572_observer_alive sample=%u pid=%d main=%d ls=0x%x",
                       interval * 30, getpid(), pthread_main_np(),
                       h539_installer_state());
+        /* H639: two samples, one before and one well after the point where the root scene
+         * window became visible in H638 (662 s), so the census brackets that event. */
+        if (interval == 14 || interval == 24) {
+            char site[16];
+            snprintf(site, sizeof site, "t%u", interval * 30);
+            census_ca_contexts(site);
+        }
     }
     return NULL;
 }
@@ -2323,7 +2393,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H638", process, getpid());
+    line("observer load process=%s pid=%d build=H639", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

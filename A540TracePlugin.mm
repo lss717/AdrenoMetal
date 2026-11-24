@@ -609,7 +609,7 @@ static void install_server_ca_event_hooks(void)
 static void census_server_context_table(const char *why, id server)
 {
     static unsigned calls;
-    if (!server || calls >= 3) {
+    if (!server || calls >= 4) {
         return;
     }
     ++calls;
@@ -677,51 +677,19 @@ static void census_server_context_table(const char *why, id server)
         caller("srvq", "invalid", detail);
     }
 
-    /* insecureProcessIds is the one server method in the list that returns process identity
-     * rather than a context handle, so it is the cheapest test of whether this interface ever
-     * reports anything about other processes at all. */
+    /* H642: report the encodings of the two object-returning server selectors, but do not call
+     * them. In H641 the census stopped immediately after printing the insecureProcessIds
+     * encoding, and the process never reached the code after it, so the call itself is the
+     * suspect. An encoding line still answers the question that matters here: whether the server
+     * exposes a cross-process view at all. */
     {
-        const Method m = observer_method(server, "insecureProcessIds");
-        const char *enc = m ? method_getTypeEncoding(m) : NULL;
-        snprintf(detail, sizeof detail, "%s insecure present=%d enc=%.20s", why, m ? 1 : 0,
-                 enc ? enc : "-");
-        caller("srvq", "insecure", detail);
-        if (observer_is_object(server, "insecureProcessIds")) {
-            id list = nil;
-            @try {
-                list = ((id (*)(id, SEL)) objc_msgSend)(server, sel_getUid("insecureProcessIds"));
-            } @catch (id ignored) { list = nil; }
-            const unsigned long long c = list ? observer_u64(list, "count", 0) : 0;
-            snprintf(detail, sizeof detail, "%s insecure list=%d count=%llu", why, list ? 1 : 0, c);
-            caller("srvq", "insecure", detail);
-            for (unsigned long long i = 0; list && i < c && i < 8; ++i) {
-                id e = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(
-                    list, @selector(objectAtIndex:), i);
-                snprintf(detail, sizeof detail, "%s insecure[%llu] cls=%.24s", why, i,
-                         e ? object_getClassName(e) : "-");
-                caller("srvq", "insecure", detail);
-            }
-        }
-    }
-
-    /* +[CAWindowServer context] is a class method, so it needs the metaclass lookup rather than
-     * the instance helper used above. */
-    {
-        Class serverClass = object_getClass(server);
-        Method cm = serverClass ? class_getClassMethod(serverClass, sel_getUid("context")) : NULL;
-        const char *enc = cm ? method_getTypeEncoding(cm) : NULL;
-        snprintf(detail, sizeof detail, "%s classcontext present=%d enc=%.20s", why, cm ? 1 : 0,
-                 enc ? enc : "-");
-        caller("srvq", "classcontext", detail);
-        if (cm && enc && enc[0] == '@') {
-            id ctx = nil;
-            @try {
-                ctx = ((id (*)(Class, SEL)) objc_msgSend)(serverClass, sel_getUid("context"));
-            } @catch (id ignored) { ctx = nil; }
-            const uint32_t cid = observer_u32(ctx, "contextId", UINT32_MAX);
-            snprintf(detail, sizeof detail, "%s classcontext obj=%d cls=%.24s id=0x%x", why,
-                     ctx ? 1 : 0, ctx ? object_getClassName(ctx) : "-", cid);
-            caller("srvq", "classcontext", detail);
+        static const char *const objects[] = { "insecureProcessIds", "isSlotValid:" };
+        for (unsigned i = 0; i < 2; ++i) {
+            const Method m = observer_method(server, objects[i]);
+            const char *enc = m ? method_getTypeEncoding(m) : NULL;
+            snprintf(detail, sizeof detail, "%s object_only=%s present=%d enc=%.20s called=0",
+                     why, objects[i], m ? 1 : 0, enc ? enc : "-");
+            caller("srvq", "objectonly", detail);
         }
     }
 }
@@ -2075,7 +2043,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H641");
+    caller("builder", "build", "H642");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */
@@ -2097,7 +2065,6 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
             const unsigned long long n = list ? ((unsigned long long (*)(id, SEL)) objc_msgSend)(list, @selector(count)) : 0;
             snprintf(detail, sizeof detail, "early srv=1 displays=%llu", n);
             caller("builder", "early", detail);
-            census_server_context_table("early", srv);
             if (n) {
                 id display = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(list, @selector(objectAtIndex:), 0ULL);
                 static const char *words[] = {
@@ -2121,6 +2088,10 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             probe_displays("observer");
             probe_display_frame("observer");
+            /* H642: the census must never run from the bundle constructor. In H641 it was called
+             * there and the constructor stopped before the observation schedule was registered, so
+             * draw# and disp# were absent for the entire boot. It now only runs from these blocks,
+             * which exist only because the schedule was registered first. */
             id srv_now = nil;
             @try { srv_now = ((id (*)(id, SEL)) objc_msgSend)(serverClass, @selector(serverIfRunning)); }
             @catch (id ignored) { srv_now = nil; }

@@ -599,6 +599,133 @@ static void install_server_ca_event_hooks(void)
  * the render server over "com.apple.CARenderServer".  Asking QuartzCore from here
  * answers both open questions in one line: whether the bootstrap service exists,
  * and how many displays the server publishes. */
+/* H641: the render server publishes no context list. What it does expose is three lookups keyed by
+ * context id - clientPortOfContextId:, taskNamePortOfContextId:, contextIdHostingContextId: - plus
+ * insecureProcessIds and the +[CAWindowServer context] class method. Before any of them can be
+ * used to ask "does the server know the desktop context", each needs a control pair: a known valid
+ * id must return a usable value and a known invalid id must not. A hit only proves this interface
+ * can see that context; a miss does not prove the context was never registered. Read-only: it
+ * never creates, binds, presents or mutates anything. */
+static void census_server_context_table(const char *why, id server)
+{
+    static unsigned calls;
+    if (!server || calls >= 3) {
+        return;
+    }
+    ++calls;
+
+    static const char *const lookups[] = {
+        "clientPortOfContextId:", "taskNamePortOfContextId:", "contextIdHostingContextId:",
+    };
+    const unsigned lookupCount = (unsigned)(sizeof lookups / sizeof lookups[0]);
+    char detail[220];
+
+    /* The encodings come first because they decide how much the numbers below mean. A missing
+     * selector, an object return and a scalar port name are three different situations, and the
+     * existing owner lookup already assumes a scalar. */
+    for (unsigned i = 0; i < lookupCount; ++i) {
+        const Method m = observer_method(server, lookups[i]);
+        const char *enc = m ? method_getTypeEncoding(m) : NULL;
+        snprintf(detail, sizeof detail, "%s lookup=%s present=%d enc=%.20s", why, lookups[i],
+                 m ? 1 : 0, enc ? enc : "-");
+        caller("srvq", "encoding", detail);
+    }
+
+    /* Control A: ids this process can name, which the existing code already resolves to this
+     * process's own task port. If even these do not resolve, the lookups are unusable. */
+    Class ctxClass = NSClassFromString(@"CAContext");
+    id all = ctxClass ? observer_object((id) ctxClass, "allContexts") : nil;
+    const unsigned long long n = all ? observer_u64(all, "count", 0) : 0;
+    for (unsigned long long i = 0; all && i < n && i < 4; ++i) {
+        id ctx = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(
+            all, @selector(objectAtIndex:), i);
+        const uint32_t cid = observer_u32(ctx, "contextId", UINT32_MAX);
+        if (cid == UINT32_MAX) {
+            continue;
+        }
+        const uint32_t client = observer_u32_arg(server, "clientPortOfContextId:", cid, 0);
+        const uint32_t task = observer_u32_arg(server, "taskNamePortOfContextId:", cid, 0);
+        const uint32_t host = observer_u32_arg(server, "contextIdHostingContextId:", cid, 0);
+        int owner = -1;
+        kern_return_t st = KERN_FAILURE;
+        if (task) {
+            st = pid_for_task((mach_port_name_t) task, &owner);
+            mach_port_deallocate(mach_task_self(), (mach_port_name_t) task);
+        }
+        snprintf(detail, sizeof detail,
+                 "%s valid[%llu] id=0x%x client=0x%x task=0x%x host=0x%x pid=%d st=0x%x",
+                 why, i, cid, client, task, host, owner, (unsigned) st);
+        caller("srvq", "valid", detail);
+    }
+
+    /* Control B: an id that cannot exist. A non-zero port or a successful pid_for_task here would
+     * mean the lookups return stale or uninitialised values and every negative result is void. */
+    {
+        const uint32_t bad = 0xdeadbeefu;
+        const uint32_t client = observer_u32_arg(server, "clientPortOfContextId:", bad, 0);
+        const uint32_t task = observer_u32_arg(server, "taskNamePortOfContextId:", bad, 0);
+        const uint32_t host = observer_u32_arg(server, "contextIdHostingContextId:", bad, 0);
+        int owner = -1;
+        kern_return_t st = KERN_FAILURE;
+        if (task) {
+            st = pid_for_task((mach_port_name_t) task, &owner);
+            mach_port_deallocate(mach_task_self(), (mach_port_name_t) task);
+        }
+        snprintf(detail, sizeof detail,
+                 "%s invalid id=0x%x client=0x%x task=0x%x host=0x%x pid=%d st=0x%x",
+                 why, bad, client, task, host, owner, (unsigned) st);
+        caller("srvq", "invalid", detail);
+    }
+
+    /* insecureProcessIds is the one server method in the list that returns process identity
+     * rather than a context handle, so it is the cheapest test of whether this interface ever
+     * reports anything about other processes at all. */
+    {
+        const Method m = observer_method(server, "insecureProcessIds");
+        const char *enc = m ? method_getTypeEncoding(m) : NULL;
+        snprintf(detail, sizeof detail, "%s insecure present=%d enc=%.20s", why, m ? 1 : 0,
+                 enc ? enc : "-");
+        caller("srvq", "insecure", detail);
+        if (observer_is_object(server, "insecureProcessIds")) {
+            id list = nil;
+            @try {
+                list = ((id (*)(id, SEL)) objc_msgSend)(server, sel_getUid("insecureProcessIds"));
+            } @catch (id ignored) { list = nil; }
+            const unsigned long long c = list ? observer_u64(list, "count", 0) : 0;
+            snprintf(detail, sizeof detail, "%s insecure list=%d count=%llu", why, list ? 1 : 0, c);
+            caller("srvq", "insecure", detail);
+            for (unsigned long long i = 0; list && i < c && i < 8; ++i) {
+                id e = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(
+                    list, @selector(objectAtIndex:), i);
+                snprintf(detail, sizeof detail, "%s insecure[%llu] cls=%.24s", why, i,
+                         e ? object_getClassName(e) : "-");
+                caller("srvq", "insecure", detail);
+            }
+        }
+    }
+
+    /* +[CAWindowServer context] is a class method, so it needs the metaclass lookup rather than
+     * the instance helper used above. */
+    {
+        Class serverClass = object_getClass(server);
+        Method cm = serverClass ? class_getClassMethod(serverClass, sel_getUid("context")) : NULL;
+        const char *enc = cm ? method_getTypeEncoding(cm) : NULL;
+        snprintf(detail, sizeof detail, "%s classcontext present=%d enc=%.20s", why, cm ? 1 : 0,
+                 enc ? enc : "-");
+        caller("srvq", "classcontext", detail);
+        if (cm && enc && enc[0] == '@') {
+            id ctx = nil;
+            @try {
+                ctx = ((id (*)(Class, SEL)) objc_msgSend)(serverClass, sel_getUid("context"));
+            } @catch (id ignored) { ctx = nil; }
+            const uint32_t cid = observer_u32(ctx, "contextId", UINT32_MAX);
+            snprintf(detail, sizeof detail, "%s classcontext obj=%d cls=%.24s id=0x%x", why,
+                     ctx ? 1 : 0, ctx ? object_getClassName(ctx) : "-", cid);
+            caller("srvq", "classcontext", detail);
+        }
+    }
+}
+
 static void probe_displays(const char *why)
 {
     mach_port_t service = MACH_PORT_NULL, bootstrap = MACH_PORT_NULL;
@@ -1948,7 +2075,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H634");
+    caller("builder", "build", "H641");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */
@@ -1970,6 +2097,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
             const unsigned long long n = list ? ((unsigned long long (*)(id, SEL)) objc_msgSend)(list, @selector(count)) : 0;
             snprintf(detail, sizeof detail, "early srv=1 displays=%llu", n);
             caller("builder", "early", detail);
+            census_server_context_table("early", srv);
             if (n) {
                 id display = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(list, @selector(objectAtIndex:), 0ULL);
                 static const char *words[] = {
@@ -1993,6 +2121,10 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             probe_displays("observer");
             probe_display_frame("observer");
+            id srv_now = nil;
+            @try { srv_now = ((id (*)(id, SEL)) objc_msgSend)(serverClass, @selector(serverIfRunning)); }
+            @catch (id ignored) { srv_now = nil; }
+            census_server_context_table("observer", srv_now);
             /* H634: the render encoders report binds=0 draws=0 dispatch=0 and
              * -newTextureWithDescriptor:iosurface:plane: is never called, so
              * the open question is whether a drawable can be obtained at all.

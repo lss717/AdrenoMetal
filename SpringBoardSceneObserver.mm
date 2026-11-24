@@ -136,6 +136,8 @@ static void schedule_application_scene_probe(unsigned tick);
 static void log_application_scene_state(const char *phase);
 static void snapshot_windows(const char *scope, id owner, unsigned sample);
 static void schedule_h557_post_run_snapshot(void);
+static void census_ca_contexts(const char *why);
+static void census_once(const char *site);
 
 static BOOL trace_by_setup_assistant_needs_to_run(void)
 {
@@ -1470,6 +1472,9 @@ static void trace_context_set_layer(id self, SEL selector, id layer)
          getpid(), (__bridge void *) self, (unsigned) contextId, hasContextId ? 1 : 0,
          class_name_or_nil(layer));
     log_layer_event("ca_context_layer", window_kind_for_layer(layer), layer);
+    if (layer) {
+        census_once("set-layer");
+    }
 }
 
 static id trace_context_remote_with_options(id self, SEL selector, id options)
@@ -1479,6 +1484,7 @@ static id trace_context_remote_with_options(id self, SEL selector, id options)
     unsigned long long contextId = 0;
     const bool hasContextId = read_integer(context, "contextId", &contextId);
     id layer = read_object(context, "layer");
+    census_once("remote-create");
     line("event=ca_context_remote_create pid=%d context=%p contextId=0x%x hasContextId=%d layer=%.24s options=%.24s",
          getpid(), (__bridge void *) context, (unsigned) contextId,
          hasContextId ? 1 : 0, class_name_or_nil(layer),
@@ -2340,6 +2346,22 @@ static void census_ca_contexts(const char *why)
     }
 }
 
+static void census_once(const char *site)
+{
+    /* H640: H639 attached the census to the periodic reporter, and that thread stops emitting
+     * mid-session while SpringBoard itself keeps running (last output 655.2 s here, 706.5 s in
+     * H636, 750.9 s in H637, with the kernel alive past 1300 s in all three).  A timer-driven
+     * observation is therefore not usable for this question.  Take the census from the two
+     * context events that demonstrably fire early instead, once per site. */
+    static bool done[2];
+    const int slot = (site && site[0] == 'r') ? 1 : 0;
+    if (done[slot]) {
+        return;
+    }
+    done[slot] = true;
+    census_ca_contexts(site);
+}
+
 static void *h539_state_reporter(void *context __unused)
 {
     for (unsigned interval = 1; interval <= 40; ++interval) {
@@ -2348,13 +2370,6 @@ static void *h539_state_reporter(void *context __unused)
         line_reserved("event=h572_observer_alive sample=%u pid=%d main=%d ls=0x%x",
                       interval * 30, getpid(), pthread_main_np(),
                       h539_installer_state());
-        /* H639: two samples, one before and one well after the point where the root scene
-         * window became visible in H638 (662 s), so the census brackets that event. */
-        if (interval == 14 || interval == 24) {
-            char site[16];
-            snprintf(site, sizeof site, "t%u", interval * 30);
-            census_ca_contexts(site);
-        }
     }
     return NULL;
 }
@@ -2393,7 +2408,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H639", process, getpid());
+    line("observer load process=%s pid=%d build=H640", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

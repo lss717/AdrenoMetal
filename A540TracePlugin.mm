@@ -1083,7 +1083,7 @@ static const char *probe_self_name(void)
     return name;
 }
 
-static void __attribute__((unused)) probe_drawable(const char *why)
+static void probe_drawable(const char *why)
 {
     Class layerClass = NSClassFromString(@"CAMetalLayer");
     if (!layerClass) {
@@ -1948,7 +1948,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H522");
+    caller("builder", "build", "H634");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */
@@ -1993,6 +1993,11 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             probe_displays("observer");
             probe_display_frame("observer");
+            /* H634: the render encoders report binds=0 draws=0 dispatch=0 and
+             * -newTextureWithDescriptor:iosurface:plane: is never called, so
+             * the open question is whether a drawable can be obtained at all.
+             * This asks the layer directly and only reports what comes back. */
+            probe_drawable("observer");
             const char *process = getprogname();
             if (process && !strcmp(process, "SpringBoard"))
                 probe_scenes("observer");

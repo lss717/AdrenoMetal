@@ -636,6 +636,10 @@ static void census_server_context_table(const char *why, id server)
     Class ctxClass = NSClassFromString(@"CAContext");
     id all = ctxClass ? observer_object((id) ctxClass, "allContexts") : nil;
     const unsigned long long n = all ? observer_u64(all, "count", 0) : 0;
+    /* H643: say the count out loud. In H641 the valid loop printed nothing at all, which looked
+     * like a broken lookup but was really an empty list at bundle-load time. */
+    snprintf(detail, sizeof detail, "%s allctx=%llu", why, n);
+    caller("srvq", "count", detail);
     for (unsigned long long i = 0; all && i < n && i < 4; ++i) {
         id ctx = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(
             all, @selector(objectAtIndex:), i);
@@ -656,6 +660,29 @@ static void census_server_context_table(const char *why, id server)
                  "%s valid[%llu] id=0x%x client=0x%x task=0x%x host=0x%x pid=%d st=0x%x",
                  why, i, cid, client, task, host, owner, (unsigned) st);
         caller("srvq", "valid", detail);
+
+        /* H643: the adjacent ids decide what a zero means. If id+1 and id-1 also resolve, the
+         * lookup is array or index based and no negative result from it is evidence of anything.
+         * If they return zero while id itself resolves, the lookup is keyed by id and a zero for a
+         * specific id starts to mean "this id is not in this table". */
+        {
+            const uint32_t next = cid + 1u;
+            const uint32_t prev = cid - 1u;
+            const uint32_t ntask =
+                observer_u32_arg(server, "taskNamePortOfContextId:", next, 0);
+            const uint32_t ptask =
+                observer_u32_arg(server, "taskNamePortOfContextId:", prev, 0);
+            snprintf(detail, sizeof detail,
+                     "%s adjacent id=0x%x next=0x%x ntask=0x%x prev=0x%x ptask=0x%x",
+                     why, cid, next, ntask, prev, ptask);
+            caller("srvq", "adjacent", detail);
+            if (ntask) {
+                mach_port_deallocate(mach_task_self(), (mach_port_name_t) ntask);
+            }
+            if (ptask) {
+                mach_port_deallocate(mach_task_self(), (mach_port_name_t) ptask);
+            }
+        }
     }
 
     /* Control B: an id that cannot exist. A non-zero port or a successful pid_for_task here would
@@ -2043,7 +2070,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H642");
+    caller("builder", "build", "H643");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

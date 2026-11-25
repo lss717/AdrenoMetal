@@ -13,6 +13,8 @@
 #include <mach/mach.h>
 #include <mach/arm/thread_status.h>
 #include <mach/thread_act.h>
+#include <libkern/OSCacheControl.h>
+#include <mach-o/dyld.h>
 #include <sys/proc.h>
 #include <cxxabi.h>
 #include <dlfcn.h>
@@ -915,6 +917,148 @@ static unsigned gTxFlushCount;
 static unsigned gTxCommitCount;
 static int gTxControlHit;
 
+/* H671: count the C++ transaction commit entry and the real render-message
+ * send inside this process. The 21H461 audit (STATUS 379/381) showed:
+ *   - +[CATransaction commit]/flush only reach CA::Transaction::commit() when
+ *     the thread-local transaction guard passes, and H670 measured the public
+ *     ObjC wrappers at zero, so the wrappers are not the send boundary;
+ *   - every commit path (ObjC wrappers, CA::Transaction::flush tail-branch,
+ *     CA::Transaction::flush_as_runloop_observer from the run-loop observer)
+ *     converges on CA::Transaction::commit() at static vm 0x189473ffc;
+ *   - the transaction payload leaves the process through
+ *     CA::Render::Message::send_message() at static vm 0x1894dfcd4.
+ * Neither symbol is exported in this cache (no importer among the 2933
+ * extracted images and empty export tries), so dlsym cannot reach them; the
+ * patch uses the static vm plus the QuartzCore image slide and refuses to
+ * write unless the first 16 bytes match the audited prologue word for word.
+ * The two stubs below are the handlers: each counts the entry, records the
+ * caller link register, re-executes the displaced (position-independent)
+ * prologue instructions and branches to site+16, so the patched function
+ * behaves exactly as before apart from the counter. */
+#define H671_COMMIT_STATIC_VM 0x189473ffcULL
+#define H671_MSGSEND_STATIC_VM 0x1894dfcd4ULL
+static const uint32_t kH671CommitPrologue[4] = {
+    0xd10383ff, 0x6d062beb, 0x6d0723e9, 0xa9086ffc};
+static const uint32_t kH671MsgSendPrologue[4] = {
+    0xd10183ff, 0xa90357f6, 0xa9044ff4, 0xa9057bfd};
+
+/* layout: 0 commitCount 8 commitLastLr 16 sendCount 24 sendLastLr
+ *         32 commitResume 40 sendResume 48 patchedBits 56 controlHit */
+extern "C" uint64_t gH671Sites[8] __attribute__((aligned(64)));
+extern "C" void h671_commit_stub(void);
+extern "C" void h671_send_stub(void);
+
+__asm__(
+".text\n"
+".p2align 2\n"
+".globl _h671_commit_stub\n"
+"_h671_commit_stub:\n"
+"    adrp x16, _gH671Sites@PAGE\n"
+"    add  x16, x16, _gH671Sites@PAGEOFF\n"
+"    ldr  x17, [x16, #0]\n"
+"    add  x17, x17, #1\n"
+"    str  x17, [x16, #0]\n"
+"    str  x30, [x16, #8]\n"
+"    sub  sp, sp, #0xe0\n"
+"    stp  d11, d10, [sp, #0x60]\n"
+"    stp  d9, d8, [sp, #0x70]\n"
+"    stp  x28, x27, [sp, #0x80]\n"
+"    ldr  x16, [x16, #32]\n"
+"    br   x16\n"
+".p2align 2\n"
+".globl _h671_send_stub\n"
+"_h671_send_stub:\n"
+"    adrp x16, _gH671Sites@PAGE\n"
+"    add  x16, x16, _gH671Sites@PAGEOFF\n"
+"    ldr  x17, [x16, #16]\n"
+"    add  x17, x17, #1\n"
+"    str  x17, [x16, #16]\n"
+"    str  x30, [x16, #24]\n"
+"    sub  sp, sp, #0x60\n"
+"    stp  x22, x21, [sp, #0x30]\n"
+"    stp  x20, x19, [sp, #0x40]\n"
+"    stp  x29, x30, [sp, #0x50]\n"
+"    ldr  x16, [x16, #40]\n"
+"    br   x16\n"
+);
+
+static bool h671_encode_jump(uint64_t from, uint64_t to, uint32_t out[4])
+{
+    const int64_t delta = ((int64_t)(to >> 12) - (int64_t)(from >> 12));
+    if (delta < -((int64_t)1 << 20) || delta >= ((int64_t)1 << 20)) return false;
+    const uint32_t imm21 = (uint32_t)delta & 0x1FFFFF;
+    out[0] = 0x90000000u | ((imm21 & 0x3u) << 29) | (((imm21 >> 2) & 0x7FFFFu) << 5) | 16u;
+    out[1] = 0x91000000u | ((uint32_t)(to & 0xFFF) << 10) | (16u << 5) | 16u;
+    out[2] = 0xD61F0000u | (16u << 5);
+    out[3] = 0xD503201Fu;
+    return true;
+}
+
+static bool h671_patch_site(uint64_t site, const uint32_t expected[4], uint64_t stub)
+{
+    const uint64_t pageStart = site & ~0xFFFULL;
+    const uint64_t span = ((site & 0xFFF) + 16 + 0xFFF) & ~0xFFFULL;
+    const kern_return_t kr = vm_protect(
+        mach_task_self(), (vm_address_t)pageStart, (vm_size_t)span, FALSE,
+        VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr != KERN_SUCCESS) return false;
+    volatile uint32_t *words = (volatile uint32_t *)(uintptr_t)site;
+    for (int i = 0; i < 4; ++i)
+        if (words[i] != expected[i]) return false;
+    uint32_t jump[4];
+    if (!h671_encode_jump(site, stub, jump)) return false;
+    words[0] = jump[0];
+    words[1] = jump[1];
+    words[3] = jump[3];
+    words[2] = jump[2];  /* br last: a reader sees adrp/add/nop before br */
+    sys_dcache_flush((void *)(uintptr_t)site, 16);
+    sys_icache_invalidate((void *)(uintptr_t)site, 16);
+    for (int i = 0; i < 4; ++i)
+        if (words[i] != jump[i]) return false;
+    return true;
+}
+
+static uint64_t h671_quartzcore_slide(void)
+{
+    const uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; ++i) {
+        const char *name = _dyld_get_image_name(i);
+        if (name && strstr(name, "/QuartzCore.framework/QuartzCore") &&
+            strncmp(name, "/System/", 8) == 0)
+            return (uint64_t)(intptr_t)_dyld_get_image_vmaddr_slide(i);
+    }
+    return 0;
+}
+
+static void install_h671_transaction_entry_patches(void)
+{
+    const uint64_t slide = h671_quartzcore_slide();
+    if (!slide) {
+        line_reserved("event=h671_patch result=no-quartzcore-image");
+        return;
+    }
+    gH671Sites[4] = H671_COMMIT_STATIC_VM + slide + 16;
+    gH671Sites[5] = H671_MSGSEND_STATIC_VM + slide + 16;
+    if (h671_patch_site(H671_COMMIT_STATIC_VM + slide, kH671CommitPrologue,
+                        (uint64_t)(uintptr_t)&h671_commit_stub))
+        gH671Sites[6] |= 1;
+    if (h671_patch_site(H671_MSGSEND_STATIC_VM + slide, kH671MsgSendPrologue,
+                        (uint64_t)(uintptr_t)&h671_send_stub))
+        gH671Sites[6] |= 2;
+    line_reserved("event=h671_patch bits=%llu slide=0x%llx",
+                  (unsigned long long)gH671Sites[6], (unsigned long long)slide);
+    if (!(gH671Sites[6] & 1)) return;
+    const uint64_t before = gH671Sites[0];
+    Class transaction = NSClassFromString(@"CATransaction");
+    if (!transaction) return;
+    ((void (*)(id, SEL))objc_msgSend)((id)transaction, sel_registerName("begin"));
+    ((void (*)(id, SEL))objc_msgSend)((id)transaction, sel_registerName("flush"));
+    if (gH671Sites[0] > before) gH671Sites[7] = 1;
+    line_reserved("event=h671_control before=%llu after=%llu control=%llu",
+                  (unsigned long long)before, (unsigned long long)gH671Sites[0],
+                  (unsigned long long)gH671Sites[7]);
+}
+
 static void publish_desktop_context_summary(unsigned created, unsigned onDisplay, unsigned withLayer,
                                             unsigned withContents, uint64_t lastId)
 {
@@ -931,9 +1075,12 @@ static void publish_desktop_context_summary(unsigned created, unsigned onDisplay
     } meta;
     memset(&meta, 0, sizeof meta);
     const int length = snprintf(meta.text, sizeof meta.text,
-                                "sb n=%u d1=%u lc=%u ct=%u id=0x%llx tx=%u/%u c=%d",
-                                created, onDisplay, withLayer, withContents, lastId,
-                                gTxFlushCount, gTxCommitCount, gTxControlHit);
+                                "sb n=%u d1=%u id=0x%llx tx=%u/%u c=%d cc=%llu mm=%llu pf=%llu",
+                                created, onDisplay, lastId,
+                                gTxFlushCount, gTxCommitCount, gTxControlHit,
+                                (unsigned long long)(gH671Sites[0] > 99999ULL ? 99999ULL : gH671Sites[0]),
+                                (unsigned long long)(gH671Sites[2] > 99999ULL ? 99999ULL : gH671Sites[2]),
+                                gH671Sites[6] | (gH671Sites[7] << 8));
     if (length <= 0 || (size_t) length >= sizeof meta.text) {
         line_reserved("event=h652_publish n=%u result=format", created);
         return;
@@ -953,9 +1100,10 @@ static void publish_desktop_context_summary(unsigned created, unsigned onDisplay
     memcpy(request.text, meta.text, sizeof meta.text);
     const kern_return_t status = IOConnectCallStructMethod(
         gConnection, gSelector, &request, sizeof request, NULL, NULL);
-    line_reserved("event=h652_publish n=%u d1=%u lc=%u ct=%u id=0x%llx bytes=%u st=0x%x",
+    line_reserved("event=h652_publish n=%u d1=%u lc=%u ct=%u id=0x%llx bytes=%u st=0x%x clr=0x%llx slr=0x%llx",
                   created, onDisplay, withLayer, withContents, lastId,
-                  (unsigned) length, (unsigned) status);
+                  (unsigned) length, (unsigned) status,
+                  (unsigned long long)gH671Sites[1], (unsigned long long)gH671Sites[3]);
 }
 
 static void emit_internal(const char *text, bool reserved)
@@ -2771,10 +2919,11 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
+    install_h671_transaction_entry_patches();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H670", process, getpid());
+    line("observer load process=%s pid=%d build=H671", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

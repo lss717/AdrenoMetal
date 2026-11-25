@@ -1979,6 +1979,80 @@ static void describe_context_options(const char *source, id options);
  * it, and the layer contents and sublayer count say whether the desktop has actually put pixels
  * into it. All four are ordinary properties here, and none of them is reachable in backboardd,
  * where +[CAContext contextWithId:] returns nil for a foreign id. */
+/* H680: hand the kernel the desktop context's render-server connection
+ * port so the render probe binds on a port that is observable inside the
+ * USB window.  CARenderContextGetServerPort is exported by QuartzCore on
+ * 21H461; CA::Render::Context::server_port (verified by disassembly)
+ * reads the port name at this object's +0xd0 and only allocates a new
+ * one when it is zero, so a zero here means "no connection yet", which
+ * the periodic pass rechecks.  The observer keeps the context objects
+ * alive via strong globals so the recheck cannot touch a freed object. */
+static id gH680Contexts[8];
+static unsigned long long gH680CtxIds[8];
+static unsigned char gH680Reported[8];
+static unsigned gH680Count;
+static mach_port_t (*gH680ServerPort)(id);
+static bool gH680SymbolTried;
+
+static mach_port_t h680_server_port(id context)
+{
+    if (!gH680SymbolTried) {
+        gH680SymbolTried = true;
+        gH680ServerPort =
+            (mach_port_t (*)(id)) dlsym(RTLD_DEFAULT, "CARenderContextGetServerPort");
+        if (gH680ServerPort == NULL) {
+            line("event=h680_render_port err=no-symbol");
+        }
+    }
+    if (gH680ServerPort == NULL || context == nil) {
+        return MACH_PORT_NULL;
+    }
+    return gH680ServerPort(context);
+}
+
+static void h680_emit(unsigned slot, int force)
+{
+    mach_port_t port = h680_server_port(gH680Contexts[slot]);
+    if (port == MACH_PORT_NULL && !force) {
+        return;
+    }
+    line("event=h680_render_port pid=%d ctxid=0x%llx port=0x%x",
+         getpid(), gH680CtxIds[slot], (unsigned) port);
+    gH680Reported[slot] = 1;
+}
+
+static void h680_watch_context(id context, unsigned long long contextId)
+{
+    for (unsigned i = 0; i < gH680Count; ++i) {
+        if (gH680CtxIds[i] == contextId) {
+            gH680Contexts[i] = context;
+            gH680Reported[i] = 0;
+            h680_emit(i, 0);
+            return;
+        }
+    }
+    if (gH680Count >= 8) {
+        return;
+    }
+    unsigned slot = gH680Count++;
+    gH680CtxIds[slot] = contextId;
+    gH680Contexts[slot] = context;
+    gH680Reported[slot] = 0;
+    h680_emit(slot, 0);
+}
+
+static void h680_repoll_render_ports(unsigned interval)
+{
+    /* Ten minutes in, an unreported context is itself an answer: the
+     * connection never produced a port. Say so once per context. */
+    const int giveUp = interval >= 20;
+    for (unsigned i = 0; i < gH680Count; ++i) {
+        if (!gH680Reported[i]) {
+            h680_emit(i, giveUp);
+        }
+    }
+}
+
 static void record_created_context(id context)
 {
     static unsigned created, onDisplay, withLayer, withContents;
@@ -2032,6 +2106,7 @@ static void record_created_context(id context)
          onDisplay, withLayer, withContents);
 
     if (hasId) {
+        h680_watch_context(context, contextId);
         publish_desktop_context_summary(created, onDisplay, withLayer, withContents, contextId);
     }
 }
@@ -3044,6 +3119,7 @@ static void *h539_state_reporter(void *context __unused)
     for (unsigned interval = 1; interval <= 40; ++interval) {
         sleep(30);
         rearm_exception_reporters("periodic");
+        h680_repoll_render_ports(interval);
         line_reserved("event=h572_observer_alive sample=%u pid=%d main=%d ls=0x%x",
                       interval * 30, getpid(), pthread_main_np(),
                       h539_installer_state());

@@ -909,6 +909,12 @@ static bool connect_accelerator(void)
  * Each context therefore gets its own line with the full fields, and the 64 byte SetMetadata slot
  * gets a cumulative summary so the render server side query keeps working without silently
  * reporting only the oldest context. */
+static IMP gTransactionFlushPublicOriginal;
+static IMP gTransactionCommitPublicOriginal;
+static unsigned gTxFlushCount;
+static unsigned gTxCommitCount;
+static int gTxControlHit;
+
 static void publish_desktop_context_summary(unsigned created, unsigned onDisplay, unsigned withLayer,
                                             unsigned withContents, uint64_t lastId)
 {
@@ -1864,12 +1870,6 @@ static void trace_layer_did_commit(id self, SEL selector, id layer)
  * +flush and +commit are real selectors in this build, so both are hooked and counted here.
  * A local positive control calls +flush once right after installation: without it, a count of
  * zero would be indeterminate rather than evidence. */
-static IMP gTransactionFlushPublicOriginal;
-static IMP gTransactionCommitPublicOriginal;
-static unsigned gTxFlushCount;
-static unsigned gTxCommitCount;
-static int gTxControlHit;
-
 static void trace_transaction_flush_public(id self, SEL selector)
 {
     ++gTxFlushCount;

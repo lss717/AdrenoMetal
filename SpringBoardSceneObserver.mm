@@ -1991,23 +1991,39 @@ static id gH680Contexts[8];
 static unsigned long long gH680CtxIds[8];
 static unsigned char gH680Reported[8];
 static unsigned gH680Count;
-static mach_port_t (*gH680ServerPort)(id);
+static mach_port_t (*gH680PortGetName)(void *);
 static bool gH680SymbolTried;
+
+/* H680c: the field at CA::Render::Context +0xd0 is a CAMachPort object
+ * pointer, not the port name.  CARenderContextGetServerPort truncates it
+ * to 32 bits on return (H680b: 0xe97ed280 / 0x5d5d7b90 / 0x5d5d0d20 were
+ * low halves of heap pointers), so read the full pointer here and unwrap
+ * with CAMachPortGetPort (21H461 disassembly: null-safe, name at +0x10). */
+static void *h680_handle(id context)
+{
+    if (context == nil) {
+        return NULL;
+    }
+    return *(void *volatile *)((volatile char *)(void *)context + 0xd0);
+}
 
 static mach_port_t h680_server_port(id context)
 {
+    void *handle;
+
     if (!gH680SymbolTried) {
         gH680SymbolTried = true;
-        gH680ServerPort =
-            (mach_port_t (*)(id)) dlsym(RTLD_DEFAULT, "CARenderContextGetServerPort");
-        if (gH680ServerPort == NULL) {
+        gH680PortGetName =
+            (mach_port_t (*)(void *)) dlsym(RTLD_DEFAULT, "CAMachPortGetPort");
+        if (gH680PortGetName == NULL) {
             line("event=h680_render_port err=no-symbol");
         }
     }
-    if (gH680ServerPort == NULL || context == nil) {
+    handle = h680_handle(context);
+    if (gH680PortGetName == NULL || handle == NULL) {
         return MACH_PORT_NULL;
     }
-    return gH680ServerPort(context);
+    return gH680PortGetName(handle);
 }
 
 static void h680_emit(unsigned slot, int force)
@@ -2016,8 +2032,9 @@ static void h680_emit(unsigned slot, int force)
     if (port == MACH_PORT_NULL && !force) {
         return;
     }
-    line("event=h680_render_port pid=%d ctxid=0x%llx port=0x%x",
-         getpid(), gH680CtxIds[slot], (unsigned) port);
+    line("event=h680_render_port pid=%d ctxid=0x%llx port=0x%x h=0x%llx",
+         getpid(), gH680CtxIds[slot], (unsigned) port,
+         (unsigned long long) (uintptr_t) h680_handle(gH680Contexts[slot]));
     gH680Reported[slot] = 1;
 }
 
@@ -3163,7 +3180,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H680", process, getpid());
+    line("observer load process=%s pid=%d build=H680c", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

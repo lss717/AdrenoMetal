@@ -1618,6 +1618,10 @@ static void record_created_context(id context)
  * the values are the ones the caller passed rather than anything the implementation may have
  * changed. Values are described only when they are strings or numbers, so no unknown -description
  * implementation is invoked, and the entry count is capped. */
+/* H654 reads the dictionary the context itself holds, and record_created_context is defined
+ * above this function, so the forward declaration is required. */
+static void describe_context_options(const char *source, id options);
+
 static void describe_context_options(const char *source, id options)
 {
     static unsigned calls;
@@ -1666,7 +1670,6 @@ static void describe_context_options(const char *source, id options)
         const Class stringClass = [NSString class];
         const Class numberClass = [NSNumber class];
 
-        const char *keyClass = key ? object_getClassName(key) : "-";
         char keyText[48] = "-";
         if (key && isKind(key, sel_getUid("isKindOfClass:"), stringClass)) {
             const char *s = toUtf8(key, sel_getUid("UTF8String"));

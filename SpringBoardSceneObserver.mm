@@ -1117,6 +1117,11 @@ static void h674_scan_image(const struct mach_header_64 *mh, intptr_t slide,
             const struct section_64 *sec = &sections[s];
             if (sec->size < 8 || sec->size > (16u << 20)) continue;
             const uintptr_t base = (uintptr_t)(sec->addr) + (uintptr_t)slide;
+            /* H674b: the H674 device round died here - an 8-byte slot read
+             * on a 4-byte aligned cache section trapped with esr 0x92000021
+             * (alignment fault) one moment after the constructor completed
+             * (STATUS 386). Slots must be naturally aligned before the scan. */
+            if ((base & 7) != 0) continue;
             const size_t count = sec->size / 8;
             void **slots = (void **)base;
             bool writable = false;

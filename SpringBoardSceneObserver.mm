@@ -986,7 +986,10 @@ static kern_return_t h672_bootstrap_look_up(mach_port_t bp, const char *service_
 
 static inline void h672_count_send(const mach_msg_header_t *msg, mach_msg_option_t option)
 {
-    /* Only calls from other images reach this wrapper (dyld keeps the
+    /* Only calls from other images reach this wrapper: dyld keeps the
+     * replacement own binding to the original, so a nonzero total here is
+     * itself the proof that the interpose is live. */
+    ++gH672MachTotal;
     gH672Flags |= 2;
     if (gH672RenderPort != MACH_PORT_NULL && (option & MACH_SEND_MSG) &&
         msg && msg->msgh_remote_port == gH672RenderPort) {

@@ -552,11 +552,15 @@ static void h655_walk(unsigned delay, uint64_t pc, uint64_t lr, uint64_t fp)
     h655_frame(delay, index++, pc);
     h655_frame(delay, index++, lr);
     fp &= kH655PointerMask;
-    while (index < 10) {
+    while (index < 16) {
         uint64_t next = 0;
         uint64_t ret = 0;
         if (!fp || (fp & 0x7)) { stop = "fp"; break; }
         if (!h655_read_word(fp, &next) || !h655_read_word(fp + 8, &ret)) { stop = "read"; break; }
+        /* H656: the saved frame pointer is itself pointer-authenticated on arm64e, so the
+         * continuity test has to run on the masked value. Without this the walk stopped at
+         * _mach_msg every round and never named the caller that is waiting. */
+        next &= kH655PointerMask;
         if (next <= fp || next - fp > 0x4000) { stop = "chain"; break; }
         h655_frame(delay, index++, ret);
         fp = next;
@@ -2698,7 +2702,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H655", process, getpid());
+    line("observer load process=%s pid=%d build=H656", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

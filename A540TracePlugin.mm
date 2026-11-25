@@ -761,6 +761,7 @@ static uint32_t abi_call_rc(uint32_t method, const void *input, size_t inputSize
  * backboardd summary can be published without destroying the field the A2 query parses. */
 static uint64_t gPublishedDesktopId;
 static unsigned gHostClassMatched;
+static unsigned gPublishToken;
 static unsigned gHostClassCount;
 
 /* H662: publish the backboardd summary with one wrapper, not two.
@@ -774,29 +775,34 @@ static unsigned gHostClassCount;
  * Set and Get run back to back on this same connection and both return codes, the stored call
  * count, the length and the read-back text go on one srvpub line. A read-back showing sb is not
  * by itself a rejection, because SpringBoard writes the same single slot. */
-static void publish_backboardd_summary(void)
+static void publish_backboardd_summary(const char *stage)
 {
     /* H665: open the tunnel first.  H664 moved this call out of
      * query_published_desktop_context, which had already connected, into the class
-     * inventory, where nothing had.  Without a connection the ABI call cannot reach the
-     * kernel, and the only place that reported it was a plugin log line, which has not been
-     * collectable since H658, so the failure was invisible. */
+     * inventory, where nothing had. */
     if (!connectAccelerator()) {
+        char abort[160];
+        snprintf(abort, sizeof abort, "st=%.1s abort=no-connection pid=%d", stage, getpid());
+        caller("srvpub", "roundtrip", abort);
         return;
     }
     NativeAdrenoAbiMetadata meta;
     memset(&meta, 0, sizeof meta);
-    /* H664: name the process that counted.  The plugin is loaded by more than one process,
-     * so a file-scope counter only means something together with the process that wrote it. */
+    /* H666: a per-process token makes the written text unique, so a read-back that differs
+     * is a concurrent overwrite and is recorded as that rather than as a rejection.  The
+     * stage names the call site, and the counts stay with the process that produced them.
+     * One Set followed immediately by one Get on this same connection, reported on the
+     * srvpub line, replaces the H666 idea of writing twice and sampling the heartbeat. */
+    const unsigned token = ++gPublishToken;
     const int length = gPublishedDesktopId
-        ? snprintf(meta.text, sizeof meta.text, "bb %.10s/%d H%u/%u id=0x%x",
-                   getprogname() ? getprogname() : "?", getpid(),
+        ? snprintf(meta.text, sizeof meta.text, "bb %.1s %.10s/%d H%u/%u id=0x%x t=%u",
+                   stage, getprogname() ? getprogname() : "?", getpid(),
                    gHostClassMatched, gHostClassCount,
-                   (unsigned) gPublishedDesktopId)
-        : snprintf(meta.text, sizeof meta.text, "bb %.10s/%d H%u/%u",
-                   getprogname() ? getprogname() : "?", getpid(),
-                   gHostClassMatched, gHostClassCount);
-    if (length <= 0 || (size_t) length >= sizeof meta.text || gHostClassCount == 0) {
+                   (unsigned) gPublishedDesktopId, token)
+        : snprintf(meta.text, sizeof meta.text, "bb %.1s %.10s/%d H%u/%u t=%u",
+                   stage, getprogname() ? getprogname() : "?", getpid(),
+                   gHostClassMatched, gHostClassCount, token);
+    if (length <= 0 || (size_t) length >= sizeof meta.text) {
         return;
     }
     meta.bytes = (uint32_t) length;
@@ -808,11 +814,16 @@ static void publish_backboardd_summary(void)
     const uint32_t getStatus = abi_call_rc(NativeAdrenoMethodGetMetadata, NULL, 0,
                                            &readBack, sizeof readBack);
     readBack.text[sizeof readBack.text - 1] = 0;
+    /* same=1 means the slot still holds exactly what this call wrote.  same=0 with
+     * get=0x0 means somebody else wrote it afterwards: a coverage limit, not a refusal. */
+    const int same = getStatus == KERN_SUCCESS && readBack.bytes == (uint32_t) length &&
+                     memcmp(readBack.text, meta.text, (size_t) length) == 0;
     char detail[220];
     snprintf(detail, sizeof detail,
-             "set=0x%x get=0x%x setBytes=%u count=%llu got=%u text=%.44s",
-             (unsigned) setStatus, (unsigned) getStatus, (unsigned) meta.bytes,
-             (unsigned long long) readBack.handle, (unsigned) readBack.bytes, readBack.text);
+             "st=%.1s set=0x%x get=0x%x count=%llu setBytes=%u got=%u same=%d want=%.20s got=%.20s",
+             stage, (unsigned) setStatus, (unsigned) getStatus,
+             (unsigned long long) readBack.handle, (unsigned) meta.bytes,
+             (unsigned) readBack.bytes, same, meta.text, readBack.text);
     caller("srvpub", "roundtrip", detail);
 }
 
@@ -2142,13 +2153,11 @@ static void probe_display_frame(const char *why)
                      * collected every round, and sets and reads back on one connection. */
                     gHostClassMatched = matched;
                     gHostClassCount = classCount;
-                    /* H664: publish from here, in the process that just counted.  H663 gated the
-                     * publish on these counters from a different function and the gate was never
-                     * satisfied, which is only consistent with the two sides running in different
-                     * processes. */
-                    if (matched > 0 || classCount > 0) {
-                        publish_backboardd_summary();
-                    }
+                    /* H666: publish unconditionally from the process that just counted.
+                     * H664 gated this on the counts being non-zero, so a NULL class list
+                     * would have left no trace at all, which is exactly the outcome H665
+                     * could not distinguish from the block never running. */
+                    publish_backboardd_summary("E");
                 }
             }
             /* H294's setContext: attempt is intentionally retired.  H416 is an
@@ -2429,7 +2438,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H665");
+    caller("builder", "build", "H666");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

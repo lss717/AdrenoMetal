@@ -740,7 +740,7 @@ static void census_server_context_table(const char *why, id server)
 static void probe_display_context_positions(const char *why, id server)
 {
     static unsigned rounds;
-    if (!server || rounds >= 4) {
+    if (!server || rounds >= 8) {
         return;
     }
     ++rounds;
@@ -2187,7 +2187,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H645");
+    caller("builder", "build", "H646");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */
@@ -2230,6 +2230,26 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
          * The transaction paths are instance methods, and they have never been listed. */
         dump_methods("ctxinst", (Class) ctxClass, NULL, 0);
     }
+    /* H646: the position probe gets its own blocks. In H645 it was called immediately after the
+     * census inside the same block, and the 664 s round stopped after the census encoding lines,
+     * so the probe never ran and the round tested nothing. Both probe rounds had already finished
+     * by 521.8 s, 61 s before SpringBoard created its context at 582.99 s, so the schedule also
+     * needs rounds that land after that point. These blocks are queued on the same utility queue
+     * as the census blocks but registered before them, so they are independent of anything the
+     * census does afterwards. */
+    const double positionDelays[] = {30.0, 120.0, 300.0, 480.0};
+    for (double delay : positionDelays) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            Class serverClass = NSClassFromString(@"CAWindowServer");
+            id srv = nil;
+            if (serverClass) {
+                @try { srv = ((id (*)(id, SEL)) objc_msgSend)(serverClass, @selector(serverIfRunning)); }
+                @catch (id ignored) { srv = nil; }
+            }
+            probe_display_context_positions("position", srv);
+        });
+    }
     const double delays[] = {30.0, 120.0, 300.0, 480.0};
     for (double delay : delays) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
@@ -2243,7 +2263,6 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
             @try { srv_now = ((id (*)(id, SEL)) objc_msgSend)(serverClass, @selector(serverIfRunning)); }
             @catch (id ignored) { srv_now = nil; }
             census_server_context_table("observer", srv_now);
-            probe_display_context_positions("observer", srv_now);
             /* H634: the render encoders report binds=0 draws=0 dispatch=0 and
              * -newTextureWithDescriptor:iosurface:plane: is never called, so
              * the open question is whether a drawable can be obtained at all.

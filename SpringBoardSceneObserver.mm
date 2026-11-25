@@ -944,7 +944,7 @@ static const uint32_t kH671MsgSendPrologue[4] = {
 
 /* layout: 0 commitCount 8 commitLastLr 16 sendCount 24 sendLastLr
  *         32 commitResume 40 sendResume 48 patchedBits 56 controlHit */
-uint64_t gH671Sites[8] __attribute__((aligned(64)));
+extern "C" uint64_t gH671Sites[8] __attribute__((aligned(64)));
 extern "C" void h671_commit_stub(void);
 extern "C" void h671_send_stub(void);
 

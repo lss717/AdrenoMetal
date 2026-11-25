@@ -925,8 +925,9 @@ static void publish_desktop_context_summary(unsigned created, unsigned onDisplay
     } meta;
     memset(&meta, 0, sizeof meta);
     const int length = snprintf(meta.text, sizeof meta.text,
-                                "sb n=%u d1=%u lc=%u ct=%u id=0x%llx",
-                                created, onDisplay, withLayer, withContents, lastId);
+                                "sb n=%u d1=%u lc=%u ct=%u id=0x%llx tx=%u/%u c=%d",
+                                created, onDisplay, withLayer, withContents, lastId,
+                                gTxFlushCount, gTxCommitCount, gTxControlHit);
     if (length <= 0 || (size_t) length >= sizeof meta.text) {
         line_reserved("event=h652_publish n=%u result=format", created);
         return;
@@ -1856,6 +1857,32 @@ static void trace_layer_did_commit(id self, SEL selector, id layer)
     log_layer_event("ca_layer_commit", kind, self);
 }
 
+/* H670: the public transaction entry points.
+ *
+ * The existing hook is on +[CATransaction flushAsRunLoopObserver], a private selector, so its
+ * zero hits never proved that no transaction was flushed - only that this one path was not taken.
+ * +flush and +commit are real selectors in this build, so both are hooked and counted here.
+ * A local positive control calls +flush once right after installation: without it, a count of
+ * zero would be indeterminate rather than evidence. */
+static IMP gTransactionFlushPublicOriginal;
+static IMP gTransactionCommitPublicOriginal;
+static unsigned gTxFlushCount;
+static unsigned gTxCommitCount;
+static int gTxControlHit;
+
+static void trace_transaction_flush_public(id self, SEL selector)
+{
+    ++gTxFlushCount;
+    ((void (*)(id, SEL)) gTransactionFlushPublicOriginal)(self, selector);
+}
+
+static void trace_transaction_commit_public(id self, SEL selector)
+{
+    ++gTxCommitCount;
+    ((void (*)(id, SEL)) gTransactionCommitPublicOriginal)(self, selector);
+}
+
+
 static void trace_transaction_flush(id self, SEL selector)
 {
     ((void (*)(id, SEL)) gTransactionFlushAsRunLoopObserver)(self, selector);
@@ -2085,6 +2112,19 @@ static void install_ca_event_hooks(void)
     const bool flush = install_class_hook(
         transaction, "flushAsRunLoopObserver",
         (IMP) trace_transaction_flush, &gTransactionFlushAsRunLoopObserver);
+    /* H670: the public entries, plus the local positive control described above. */
+    const bool flushPublic = install_class_hook(
+        transaction, "flush", (IMP) trace_transaction_flush_public,
+        &gTransactionFlushPublicOriginal);
+    const bool commitPublic = install_class_hook(
+        transaction, "commit", (IMP) trace_transaction_commit_public,
+        &gTransactionCommitPublicOriginal);
+    line_reserved("event=h670_tx_hooks flush_public=%d commit_public=%d loopback=%d control=%d", flushPublic ? 1 : 0, commitPublic ? 1 : 0, (flushPublic && transaction) ? 1 : 0, gTxControlHit);
+    if (flushPublic && transaction) {
+        ((void (*)(id, SEL)) objc_msgSend)((id)transaction, sel_registerName("flush"));
+        gTxControlHit = gTxFlushCount > 0 ? 1 : 0;
+        line_reserved("event=h670_tx_control flushes=%u control=%d", gTxFlushCount, gTxControlHit);
+    }
     const bool windowHidden = install_instance_hook(
         window, "_setHidden:forced:", (IMP) trace_window_set_hidden,
         &gWindowSetHidden);
@@ -2734,7 +2774,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H657", process, getpid());
+    line("observer load process=%s pid=%d build=H670", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

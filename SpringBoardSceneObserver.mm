@@ -1544,6 +1544,10 @@ static void trace_context_set_layer(id self, SEL selector, id layer)
     }
 }
 
+/* H654: record_created_context below reads the dictionary the context itself holds, and the
+ * helper that describes it is defined further down this file, so declare it before use. */
+static void describe_context_options(const char *source, id options);
+
 /* H652: read the fields that decide the first frame, from the process that owns them.
 
  * displayId says which display this context points at, layer says whether anything is mounted on
@@ -1618,9 +1622,6 @@ static void record_created_context(id context)
  * the values are the ones the caller passed rather than anything the implementation may have
  * changed. Values are described only when they are strings or numbers, so no unknown -description
  * implementation is invoked, and the entry count is capped. */
-/* H654 reads the dictionary the context itself holds, and record_created_context is defined
- * above this function, so the forward declaration is required. */
-static void describe_context_options(const char *source, id options);
 
 static void describe_context_options(const char *source, id options)
 {

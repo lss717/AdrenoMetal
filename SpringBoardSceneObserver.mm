@@ -3163,7 +3163,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H674", process, getpid());
+    line("observer load process=%s pid=%d build=H680", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

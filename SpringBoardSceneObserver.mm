@@ -1606,7 +1606,7 @@ static void describe_context_options(id options)
         return;
     }
     const SEL respondsSel = sel_getUid("respondsToSelector:");
-    const BOOL (*responds)(id, SEL, SEL) = (const BOOL (*)(id, SEL, SEL)) objc_msgSend;
+    BOOL (*responds)(id, SEL, SEL) = (BOOL (*)(id, SEL, SEL)) objc_msgSend;
     if (!responds(options, respondsSel, sel_getUid("count"))) {
         line_reserved("event=h653_options idx=%u cls=%.24s no-count=1", calls - 1,
                       object_getClassName(options));
@@ -1637,7 +1637,7 @@ static void describe_context_options(id options)
                     options, sel_getUid("objectForKey:"), key);
             } @catch (id ignored) { value = nil; }
         }
-        const BOOL (*isKind)(id, SEL, Class) = (const BOOL (*)(id, SEL, Class)) objc_msgSend;
+        BOOL (*isKind)(id, SEL, Class) = (BOOL (*)(id, SEL, Class)) objc_msgSend;
         const char * (*toUtf8)(id, SEL) = (const char * (*)(id, SEL)) objc_msgSend;
         const Class stringClass = [NSString class];
         const Class numberClass = [NSNumber class];

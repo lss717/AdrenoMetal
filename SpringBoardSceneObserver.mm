@@ -13,7 +13,7 @@
 #include <mach/mach.h>
 #include <mach/arm/thread_status.h>
 #include <mach/thread_act.h>
-#include <mach-o/dyld.h>
+#include <mach-o/dyld.h> #include <mach-o/loader.h>
 // servers/bootstrap.h is not in the public SDK; the prototype is stable.
 extern "C" kern_return_t bootstrap_look_up(mach_port_t bp, const char *service_name, mach_port_t *sp);
 #include <sys/proc.h>
@@ -1017,31 +1017,100 @@ static mach_msg_return_t h672_mach_msg_overwrite(mach_msg_header_t *msg,
 }
 
 
-__attribute__((used, section("__DATA,__interpose")))
-static const DyldInterpose gH672Interpose[] = {
-    {
-        (const void *) h672_obs_create,
-        (const void *) CFRunLoopObserverCreate,
-    },
+/* H673: H672 proved the __DATA,__interpose table never rebinds shared-cache
+ * callers (STATUS 384), so the same four wrappers are installed by rewriting
+ * the per-process GOT slots of the caller images, the fishhook mechanism.
+ * GOT pages are private data after chained fixups: no text page is touched,
+ * nothing is executed from modified memory, and this observer image itself
+ * is skipped so the wrapper tail calls keep binding to the real symbols.
+ * The per-symbol swapped-slot counts are the install proof. */
+static uint64_t gH673Swapped[4];
+static uint64_t gH673ScanPass;
 
-    {
-        (const void *) h672_bootstrap_look_up,
-        (const void *) bootstrap_look_up,
-    },
-    {
-        (const void *) h672_mach_msg,
-        (const void *) mach_msg,
-    },
-    {
-        (const void *) h672_mach_msg_overwrite,
-        (const void *) mach_msg_overwrite,
-    },
+static void h673_scan_image(const struct mach_header_64 *mh, intptr_t slide,
+                            const void *targets[4], const void *replacements[4])
+{
+    const uint8_t *cursor = (const uint8_t *)mh + sizeof (struct mach_header_64);
+    for (uint32_t command = 0; command < mh->ncmds; ++command) {
+        const struct load_command *lc = (const struct load_command *)cursor;
+        cursor += lc->cmdsize;
+        if (lc->cmd != LC_SEGMENT_64) continue;
+        const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+        if (strncmp(seg->segname, "__DATA", 16) != 0 &&
+            strncmp(seg->segname, "__DATA_CONST", 16) != 0 &&
+            strncmp(seg->segname, "__DATA_DIRTY", 16) != 0) continue;
+        const struct section_64 *sections = (const struct section_64 *)(seg + 1);
+        for (uint32_t s = 0; s < seg->nsects; ++s) {
+            const struct section_64 *sec = &sections[s];
+            if (strcmp(sec->sectname, "__got") != 0 &&
+                strcmp(sec->sectname, "__auth_got") != 0) continue;
+            const uintptr_t base = (uintptr_t)(sec->addr) + (uintptr_t)slide;
+            const size_t count = sec->size / 8;
+            void **slots = (void **)base;
+            bool writable = false;
+            for (size_t i = 0; i < count; ++i) {
+                void *value = __atomic_load_n(&slots[i], __ATOMIC_ACQUIRE);
+                for (int t = 0; t < 4; ++t) {
+                    if (!targets[t] || value != targets[t]) continue;
+                    if (!writable) {
+                        const uintptr_t page = base & ~(uintptr_t)0xFFF;
+                        const vm_size_t span = (vm_size_t)
+                            (((base + sec->size) - page + 0xFFF) & ~(uintptr_t)0xFFF);
+                        if (vm_protect(mach_task_self(), (vm_address_t)page, span,
+                                       FALSE, VM_PROT_READ | VM_PROT_WRITE) != KERN_SUCCESS &&
+                            vm_protect(mach_task_self(), (vm_address_t)page, span,
+                                       FALSE, VM_PROT_READ | VM_PROT_WRITE |
+                                              VM_PROT_COPY) != KERN_SUCCESS)
+                            t = 4;
+                        else
+                            writable = true;
+                    }
+                    if (!writable) continue;
+                    __atomic_store_n(&slots[i], (void *)replacements[t],
+                                     __ATOMIC_RELEASE);
+                    ++gH673Swapped[t];
+                }
+            }
+        }
+    }
+}
 
-};
+static void install_h673_got_rebinding(void)
+{
+    if (gH673ScanPass >= 2) return;
+    ++gH673ScanPass;
+    Dl_info self;
+    const void *selfBase =
+        dladdr((const void *)&h672_mach_msg, &self) ? self.dli_fbase : NULL;
+    const void *targets[4] = {
+        dlsym(RTLD_DEFAULT, "CFRunLoopObserverCreate"),
+        dlsym(RTLD_DEFAULT, "bootstrap_look_up"),
+        dlsym(RTLD_DEFAULT, "mach_msg"),
+        dlsym(RTLD_DEFAULT, "mach_msg_overwrite"),
+    };
+    const void *replacements[4] = {
+        (const void *)h672_obs_create,
+        (const void *)h672_bootstrap_look_up,
+        (const void *)h672_mach_msg,
+        (const void *)h672_mach_msg_overwrite,
+    };
+    const uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; ++i) {
+        const struct mach_header_64 *mh =
+            (const struct mach_header_64 *)_dyld_get_image_header(i);
+        if (!mh || (const void *)mh == selfBase) continue;
+        if (mh->magic != MH_MAGIC_64) continue;
+        h673_scan_image(mh, _dyld_get_image_vmaddr_slide(i), targets, replacements);
+    }
+    if (gH673Swapped[0] || gH673Swapped[1] ||
+        gH673Swapped[2] || gH673Swapped[3])
+        gH672Flags |= 8;
+}
 
 static void publish_desktop_context_summary(unsigned created, unsigned onDisplay, unsigned withLayer,
                                             unsigned withContents, uint64_t lastId)
 {
+    install_h673_got_rebinding();
     if (!connect_accelerator()) {
         line_reserved("event=h652_publish n=%u d1=%u lc=%u ct=%u id=0x%llx result=no-accelerator",
                       created, onDisplay, withLayer, withContents, lastId);
@@ -1080,11 +1149,13 @@ static void publish_desktop_context_summary(unsigned created, unsigned onDisplay
     memcpy(request.text, meta.text, sizeof meta.text);
     const kern_return_t status = IOConnectCallStructMethod(
         gConnection, gSelector, &request, sizeof request, NULL, NULL);
-    line_reserved("event=h652_publish n=%u d1=%u lc=%u ct=%u id=0x%llx bytes=%u st=0x%x h672 of=%llu mm=%llu mt=%llu ok=%llu",
+    line_reserved("event=h652_publish n=%u d1=%u lc=%u ct=%u id=0x%llx bytes=%u st=0x%x h672 of=%llu mm=%llu mt=%llu ok=%llu sw=%llu/%llu/%llu/%llu",
                   created, onDisplay, withLayer, withContents, lastId,
                   (unsigned) length, (unsigned) status,
                   (unsigned long long)gH672ObserverFires, (unsigned long long)gH672MachSends,
-                  (unsigned long long)gH672MachTotal, (unsigned long long)gH672Flags);
+                  (unsigned long long)gH672MachTotal, (unsigned long long)gH672Flags,
+                  (unsigned long long)gH673Swapped[0], (unsigned long long)gH673Swapped[1],
+                  (unsigned long long)gH673Swapped[2], (unsigned long long)gH673Swapped[3]);
 }
 
 static void emit_internal(const char *text, bool reserved)
@@ -2901,10 +2972,11 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
     h672_install_ca_observer_anchor();
+    install_h673_got_rebinding();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H672", process, getpid());
+    line("observer load process=%s pid=%d build=H673", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

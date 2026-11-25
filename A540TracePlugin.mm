@@ -757,6 +757,9 @@ static uint32_t abi_call_rc(uint32_t method, const void *input, size_t inputSize
 /* H662: the class inventory collected in probe_display_frame.  That function reports on plugin
  * log lines, which have not been collectable in H658 through H661, so the numbers are kept here
  * and published from a connection whose reporting line does arrive. */
+/* H660: the desktop context id last read from the published metadata, kept so the
+ * backboardd summary can be published without destroying the field the A2 query parses. */
+static uint64_t gPublishedDesktopId;
 static unsigned gHostClassMatched;
 static unsigned gHostClassCount;
 
@@ -805,9 +808,6 @@ static void publish_backboardd_summary(void)
     caller("srvpub", "roundtrip", detail);
 }
 
-/* H660: the desktop context id last read from the published metadata, kept so the
- * backboardd summary can be published without destroying the field the A2 query parses. */
-static uint64_t gPublishedDesktopId;
 
 static void query_published_desktop_context(const char *why, id server)
 {

@@ -40,6 +40,7 @@ extern "C" id objc_msgSendSuper2(struct objc_super *, SEL);
 
 static const uint32_t kTunnelMagic = 0x4e544e4c; /* 'NTNL' */
 static const uint32_t kMethodLog = 17;
+static const uint32_t kMethodSetMetadata = 9;
 static const uint32_t kMaxLog = 184;
 
 static io_connect_t gConnection;
@@ -777,6 +778,59 @@ static bool connect_accelerator(void)
     return false;
 }
 
+/* H648: hand this boot's desktop context id to the render server process.
+
+ * The position probe in backboardd cannot answer whether the server knows the desktop context,
+ * because a zero there is ambiguous between "not attached" and "sampled outside its coverage".
+ * The one thing that would settle it is asking the server about the exact id the desktop process
+ * created. That id only exists inside SpringBoard, so it has to cross over.
+ *
+ * The channel is not new: both processes already call into the same AGXDeviceUserClient tunnel on
+ * every log line, and SetMetadata is already implemented there and already stores its text in the
+ * kernel. This only uses that existing path, once, and reports the kern_return so a failure is a
+ * stated fact rather than a silent absence. */
+static void publish_desktop_context_id(uint64_t contextId)
+{
+    static bool published;
+    if (published) {
+        return;
+    }
+    published = true;
+    if (!connect_accelerator()) {
+        line_reserved("event=h648_publish id=0x%llx result=no-accelerator", contextId);
+        return;
+    }
+    struct {
+        uint64_t handle;
+        uint32_t bytes;
+        uint32_t reserved;
+        char text[64];
+    } meta;
+    memset(&meta, 0, sizeof meta);
+    const int length = snprintf(meta.text, sizeof meta.text, "sbctx=0x%llx", contextId);
+    if (length <= 0 || (size_t) length >= sizeof meta.text) {
+        line_reserved("event=h648_publish id=0x%llx result=format", contextId);
+        return;
+    }
+    meta.bytes = (uint32_t) length;
+    struct {
+        uint32_t magic, method;
+        uint64_t handle;
+        uint32_t bytes, reserved;
+        char text[64];
+    } request;
+    memset(&request, 0, sizeof request);
+    request.magic = kTunnelMagic;
+    request.method = kMethodSetMetadata;
+    request.handle = meta.handle;
+    request.bytes = meta.bytes;
+    memcpy(request.text, meta.text, sizeof meta.text);
+    const kern_return_t status = IOConnectCallStructMethod(
+        gConnection, gSelector, &request, sizeof request, NULL, NULL);
+    line_reserved("event=h648_publish id=0x%llx bytes=%u st=0x%x",
+                  contextId, (unsigned) length, (unsigned) status);
+}
+
 static void emit_internal(const char *text, bool reserved)
 {
     if (!text || (!reserved && gBudget == 0)) return;
@@ -1485,6 +1539,9 @@ static id trace_context_remote_with_options(id self, SEL selector, id options)
     const bool hasContextId = read_integer(context, "contextId", &contextId);
     id layer = read_object(context, "layer");
     census_once("remote-create");
+    if (hasContextId) {
+        publish_desktop_context_id(contextId);
+    }
     line("event=ca_context_remote_create pid=%d context=%p contextId=0x%x hasContextId=%d layer=%.24s options=%.24s",
          getpid(), (__bridge void *) context, (unsigned) contextId,
          hasContextId ? 1 : 0, class_name_or_nil(layer),
@@ -2408,7 +2465,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H640", process, getpid());
+    line("observer load process=%s pid=%d build=H648", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

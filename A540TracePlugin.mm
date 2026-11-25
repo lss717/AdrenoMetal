@@ -737,6 +737,91 @@ static void census_server_context_table(const char *why, id server)
  * known to belong to this process, or yields nothing, says the sampled positions did not hit; it
  * does not establish the scope of the interface and does not say an external context is
  * unregistered. */
+/* Both helpers are defined further down with the rest of the accelerator path. */
+static bool connectAccelerator(void);
+static uint32_t abi_call_rc(uint32_t method, const void *input, size_t inputSize, void *output,
+                            size_t outputSize);
+
+/* H648: ask the render server about the id the desktop process published.
+ *
+ * SpringBoard puts its own context id into the kernel through SetMetadata, and GetMetadata now
+ * reads it back. That turns the cross-process question into one bounded query on the interface
+ * that was calibrated in H643: if taskNamePortOfContextId: resolves that id to a pid other than
+ * this one, the lookup does reach across processes and A2 is satisfied. If it returns zero, the
+ * only honest reading is that this interface does not carry that id, and it still does not say
+ * the context was never registered, because the publishing side and the registration side are
+ * different tables.
+ *
+ * The stored handle is the SetMetadata call count, so a reader can tell whether the desktop
+ * process published anything at all in this boot. */
+static void query_published_desktop_context(const char *why, id server)
+{
+    static unsigned calls;
+    if (!server || calls >= 8) {
+        return;
+    }
+    ++calls;
+
+    char detail[220];
+    struct {
+        uint64_t handle;
+        uint32_t bytes;
+        uint32_t reserved;
+        char text[64];
+    } meta;
+    memset(&meta, 0, sizeof meta);
+    if (!connectAccelerator()) {
+        snprintf(detail, sizeof detail, "%s read accelerator-open-failed", why);
+        caller("srvpub", "abort", detail);
+        return;
+    }
+    const uint32_t status = abi_call_rc(10 /* NativeAdrenoMethodGetMetadata */, NULL, 0,
+                                        &meta, sizeof meta);
+    meta.text[63] = 0;
+    snprintf(detail, sizeof detail, "%s read st=0x%x handle=%llu bytes=%u text=%.40s",
+             why, (unsigned) status, (unsigned long long) meta.handle, (unsigned) meta.bytes,
+             meta.text);
+    caller("srvpub", "read", detail);
+    if (status != KERN_SUCCESS || meta.bytes == 0) {
+        return;
+    }
+
+    unsigned long long published = 0;
+    if (sscanf(meta.text, "sbctx=0x%llx", &published) != 1) {
+        snprintf(detail, sizeof detail, "%s parse-failed text=%.40s", why, meta.text);
+        caller("srvpub", "parse", detail);
+        return;
+    }
+    const uint32_t cid = (uint32_t) published;
+
+    const uint32_t client = observer_u32_arg(server, "clientPortOfContextId:", cid, 0);
+    const uint32_t task = observer_u32_arg(server, "taskNamePortOfContextId:", cid, 0);
+    const uint32_t host = observer_u32_arg(server, "contextIdHostingContextId:", cid, 0);
+    int owner = -1;
+    kern_return_t pidStatus = KERN_FAILURE;
+    if (task) {
+        pidStatus = pid_for_task((mach_port_name_t) task, &owner);
+        mach_port_deallocate(mach_task_self(), (mach_port_name_t) task);
+    }
+    snprintf(detail, sizeof detail,
+             "%s published id=0x%x client=0x%x task=0x%x host=0x%x pid=%d st=0x%x",
+             why, cid, client, task, host, owner, (unsigned) pidStatus);
+    caller("srvpub", "query", detail);
+
+    /* The same adjacent control as the census, so a non-zero here cannot be an index artefact. */
+    const uint32_t ntask = observer_u32_arg(server, "taskNamePortOfContextId:", cid + 1u, 0);
+    const uint32_t ptask = observer_u32_arg(server, "taskNamePortOfContextId:", cid - 1u, 0);
+    snprintf(detail, sizeof detail, "%s adjacent id=0x%x ntask=0x%x ptask=0x%x",
+             why, cid, ntask, ptask);
+    caller("srvpub", "adjacent", detail);
+    if (ntask) {
+        mach_port_deallocate(mach_task_self(), (mach_port_name_t) ntask);
+    }
+    if (ptask) {
+        mach_port_deallocate(mach_task_self(), (mach_port_name_t) ptask);
+    }
+}
+
 static void probe_display_context_positions(const char *why, id server)
 {
     static unsigned rounds;
@@ -744,6 +829,10 @@ static void probe_display_context_positions(const char *why, id server)
         return;
     }
     ++rounds;
+
+    /* H648: the published-id query runs on the same repeating schedule, so its newest reading is
+     * always inside the ring retention window, which is what H646 lacked. */
+    query_published_desktop_context(why, server);
 
     char detail[220];
     id displays = observer_object(server, "displays");
@@ -2187,7 +2276,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H647");
+    caller("builder", "build", "H648");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

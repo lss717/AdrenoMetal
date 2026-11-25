@@ -507,11 +507,69 @@ static BOOL trace_mc_should_show_cloud_configuration_ui(id self, SEL selector)
     return NO;
 }
 
+/* H655: name the instruction the main thread is parked on.
+ *
+ * The sampler has printed the same pc/lr pair in every recent round, and lr is always
+ * pc + 0x36cc, so the park site is one fixed call in one image. Only the load address of
+ * that image changes each boot, which is why the address has never been identified.
+ * dladdr resolves it inside this process, and the frame records chain the frames above it.
+ * Stack words are read through vm_read_overwrite so a bad pointer returns an error here
+ * instead of faulting the process being observed. */
+static const uint64_t kH655PointerMask = 0x0000FFFFFFFFFFFFull;
+
+static bool h655_read_word(uint64_t address, uint64_t *word)
+{
+    mach_vm_size_t moved = 0;
+    const kern_return_t status = vm_read_overwrite(
+        mach_task_self(), (mach_vm_address_t)address, sizeof(uint64_t),
+        (mach_vm_address_t)word, &moved);
+    return status == KERN_SUCCESS && moved == sizeof(uint64_t);
+}
+
+static void h655_frame(unsigned delay, unsigned index, uint64_t address)
+{
+    Dl_info info;
+    char image[80];
+    address &= kH655PointerMask;
+    if (dladdr((const void *)address, &info) && info.dli_fname && info.dli_fbase) {
+        snprintf(image, sizeof image, "%.64s+0x%llx", info.dli_fname,
+                 (unsigned long long)(address - (uint64_t)(uintptr_t)info.dli_fbase));
+    } else {
+        snprintf(image, sizeof image, "unmapped");
+    }
+    line("event=h655_stall_frame delay=%u i=%u addr=0x%llx image=%s",
+         delay, index, (unsigned long long)address, image);
+}
+
+/* Walk the frame records of the sampled thread. The first two entries are pc and lr,
+ * because a thread blocked in a leaf function has already stored its own frame, and the
+ * chain then names each caller. The walk stops at the first frame record that does not
+ * move forward, which is the normal end of a stack. */
+static void h655_walk(unsigned delay, uint64_t pc, uint64_t lr, uint64_t fp)
+{
+    unsigned index = 0;
+    const char *stop = "limit";
+    h655_frame(delay, index++, pc);
+    h655_frame(delay, index++, lr);
+    fp &= kH655PointerMask;
+    while (index < 10) {
+        uint64_t next = 0;
+        uint64_t ret = 0;
+        if (!fp || (fp & 0x7)) { stop = "fp"; break; }
+        if (!h655_read_word(fp, &next) || !h655_read_word(fp + 8, &ret)) { stop = "read"; break; }
+        if (next <= fp || next - fp > 0x4000) { stop = "chain"; break; }
+        h655_frame(delay, index++, ret);
+        fp = next;
+    }
+    line("event=h655_stall_walk delay=%u frames=%u stop=%s", delay, index, stop);
+}
 static void *sample_main_thread_after_setup_return(void *context)
 {
     mach_port_t thread = (mach_port_t)(uintptr_t)context;
     static const unsigned delays[] = { 1, 2, 4, 7, 15, 30, 60, 120 };
     unsigned previous = 0;
+    uint64_t lastPc = 0;
+    unsigned walks = 0;
     for (unsigned index = 0; index < sizeof delays / sizeof delays[0]; ++index) {
         usleep((useconds_t)(delays[index] - previous) * 1000000);
         previous = delays[index];
@@ -526,6 +584,19 @@ static void *sample_main_thread_after_setup_return(void *context)
              (unsigned long long)state.__lr,
              (unsigned long long)state.__sp,
              (unsigned long long)state.__fp);
+        if (status != KERN_SUCCESS) {
+            continue;
+        }
+
+        /* H655: walk the stack once the same pc has been seen twice, which is what a
+         * park looks like, and once at 30 s if nothing repeated. Observer output stops
+         * mid-session in every round, so the 60 s and 120 s samples have never arrived. */
+        const bool repeated = state.__pc == lastPc;
+        lastPc = state.__pc;
+        if (walks < 2 && (repeated || (delays[index] == 30 && walks == 0))) {
+            ++walks;
+            h655_walk(delays[index], state.__pc, state.__lr, state.__fp);
+        }
     }
     return NULL;
 }
@@ -2627,7 +2698,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H654", process, getpid());
+    line("observer load process=%s pid=%d build=H655", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

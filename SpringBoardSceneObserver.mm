@@ -964,6 +964,7 @@ static CFRunLoopObserverRef h672_obs_create(CFAllocatorRef allocator,
     CFOptionFlags activities, Boolean repeats, CFIndex order,
     CFRunLoopObserverCallBack callback, CFRunLoopObserverContext *context)
 {
+    __atomic_add_fetch(&gH674Ctl[0], 1, __ATOMIC_RELAXED);
     if (callback && gH672CaObserverCallback &&
         (uintptr_t)callback == gH672CaObserverCallback) {
         gH672RealObserverCallback = callback;
@@ -977,10 +978,12 @@ static CFRunLoopObserverRef h672_obs_create(CFAllocatorRef allocator,
 static kern_return_t h672_bootstrap_look_up(mach_port_t bp, const char *service_name,
                                             mach_port_t *sp)
 {
+    __atomic_add_fetch(&gH674Ctl[1], 1, __ATOMIC_RELAXED);
     const kern_return_t kr = bootstrap_look_up(bp, service_name, sp);
     if (kr == KERN_SUCCESS && service_name && sp &&
         strstr(service_name, "CARenderServer") != NULL) {
         gH672RenderPort = *sp;
+        gH674Ctl[8] = (uint64_t)*sp;
         gH672Flags |= 4;
     }
     return kr;
@@ -1018,18 +1021,84 @@ static mach_msg_return_t h672_mach_msg_overwrite(mach_msg_header_t *msg,
 }
 
 
-/* H673: H672 proved the __DATA,__interpose table never rebinds shared-cache
- * callers (STATUS 384), so the same four wrappers are installed by rewriting
- * the per-process GOT slots of the caller images, the fishhook mechanism.
- * GOT pages are private data after chained fixups: no text page is touched,
- * nothing is executed from modified memory, and this observer image itself
- * is skipped so the wrapper tail calls keep binding to the real symbols.
- * The per-symbol swapped-slot counts are the install proof. */
-static uint64_t gH673Swapped[4];
-static uint64_t gH673ScanPass;
+/* H674: H673 proved the data-slot rebinding itself is safe (21 slots
+ * rewritten, SpringBoard untouched) but the __got-only scan never met the
+ * hot paths: every wrapper stayed at zero. STATUS 385 lists the two
+ * candidate explanations (the swapped slots belong to cold callers, or the
+ * cache images reach these imports through data outside the named __got
+ * sections) and this round is built to separate them: the scan now walks
+ * every section of every writable data segment, targets the full mach_msg
+ * family including the iOS 17 hot pair mach_msg2/mach_msg2_trap (installed
+ * as prototype-free asm pass-through stubs that keep all argument
+ * registers), counts every wrapper entry unconditionally, and records for
+ * each swap which image and section it landed in. */
+static uint64_t gH674Swapped[6];
+static uint64_t gH674ScanPass;
+static uint64_t gH674Reported;
+/* control block shared with the asm stubs:
+ * 0 observer entries, 8 bootstrap entries, 16 mach_msg2 entries,
+ * 24 mach_msg2_trap entries, 32 mach_msg2 render-port sends,
+ * 40 mach_msg2_trap render-port sends, 48 real mach_msg2,
+ * 56 real mach_msg2_trap, 64 render port mirror */
+extern "C" uint64_t gH674Ctl[12] __attribute__((aligned(64)));
+extern "C" void h674_msg2_stub(void);
+extern "C" void h674_msg2trap_stub(void);
 
-static void h673_scan_image(const struct mach_header_64 *mh, intptr_t slide,
-                            const void *targets[4], const void *replacements[4])
+__asm__(
+".text\\n"
+".p2align 2\\n"
+".globl _h674_msg2_stub\\n"
+"_h674_msg2_stub:\\n"
+"    adrp x16, _gH674Ctl@PAGE\\n"
+"    add  x16, x16, _gH674Ctl@PAGEOFF\\n"
+"    ldr  x17, [x16, #16]\\n"
+"    add  x17, x17, #1\\n"
+"    str  x17, [x16, #16]\\n"
+"    cbz  x0, 1f\\n"
+"    ldr  x8, [x16, #64]\\n"
+"    cbz  x8, 1f\\n"
+"    ldr  w17, [x0, #8]\\n"
+"    cmp  w17, w8\\n"
+"    b.ne 1f\\n"
+"    ldr  x17, [x16, #32]\\n"
+"    add  x17, x17, #1\\n"
+"    str  x17, [x16, #32]\\n"
+"1:  ldr  x16, [x16, #48]\\n"
+"    cbz  x16, 2f\\n"
+"    br   x16\\n"
+"2:  mov  w0, #0x4\\n"
+"    ret\\n"
+".p2align 2\\n"
+".globl _h674_msg2trap_stub\\n"
+"_h674_msg2trap_stub:\\n"
+"    adrp x16, _gH674Ctl@PAGE\\n"
+"    add  x16, x16, _gH674Ctl@PAGEOFF\\n"
+"    ldr  x17, [x16, #24]\\n"
+"    add  x17, x17, #1\\n"
+"    str  x17, [x16, #24]\\n"
+"    cbz  x0, 1f\\n"
+"    ldr  x8, [x16, #64]\\n"
+"    cbz  x8, 1f\\n"
+"    ldr  w17, [x0, #8]\\n"
+"    cmp  w17, w8\\n"
+"    b.ne 1f\\n"
+"    ldr  x17, [x16, #40]\\n"
+"    add  x17, x17, #1\\n"
+"    str  x17, [x16, #40]\\n"
+"1:  ldr  x16, [x16, #56]\\n"
+"    cbz  x16, 2f\\n"
+"    br   x16\\n"
+"2:  mov  w0, #0x4\\n"
+"    ret\\n"
+);
+
+static const char kH674Letters[6] = { 'o', 'b', 'm', 'w', '2', '3' };
+static char gH674Log[8][40];
+static uint64_t gH674LogCount;
+
+static void h674_scan_image(const struct mach_header_64 *mh, intptr_t slide,
+                            const char *imageName,
+                            const void *targets[6], const void *replacements[6])
 {
     const uint8_t *cursor = (const uint8_t *)mh + sizeof (struct mach_header_64);
     for (uint32_t command = 0; command < mh->ncmds; ++command) {
@@ -1043,15 +1112,14 @@ static void h673_scan_image(const struct mach_header_64 *mh, intptr_t slide,
         const struct section_64 *sections = (const struct section_64 *)(seg + 1);
         for (uint32_t s = 0; s < seg->nsects; ++s) {
             const struct section_64 *sec = &sections[s];
-            if (strcmp(sec->sectname, "__got") != 0 &&
-                strcmp(sec->sectname, "__auth_got") != 0) continue;
+            if (sec->size < 8 || sec->size > (16u << 20)) continue;
             const uintptr_t base = (uintptr_t)(sec->addr) + (uintptr_t)slide;
             const size_t count = sec->size / 8;
             void **slots = (void **)base;
             bool writable = false;
             for (size_t i = 0; i < count; ++i) {
                 void *value = __atomic_load_n(&slots[i], __ATOMIC_ACQUIRE);
-                for (int t = 0; t < 4; ++t) {
+                for (int t = 0; t < 6; ++t) {
                     if (!targets[t] || value != targets[t]) continue;
                     if (!writable) {
                         const uintptr_t page = base & ~(uintptr_t)0xFFF;
@@ -1062,56 +1130,77 @@ static void h673_scan_image(const struct mach_header_64 *mh, intptr_t slide,
                             vm_protect(mach_task_self(), (vm_address_t)page, span,
                                        FALSE, VM_PROT_READ | VM_PROT_WRITE |
                                               VM_PROT_COPY) != KERN_SUCCESS)
-                            t = 4;
+                            t = 6;
                         else
                             writable = true;
                     }
                     if (!writable) continue;
                     __atomic_store_n(&slots[i], (void *)replacements[t],
                                      __ATOMIC_RELEASE);
-                    ++gH673Swapped[t];
+                    ++gH674Swapped[t];
+                    if (gH674LogCount < 8)
+                        snprintf(gH674Log[gH674LogCount++], 40, "%c:%s/%s",
+                                 kH674Letters[t], imageName, sec->sectname);
                 }
             }
         }
     }
 }
 
-static void install_h673_got_rebinding(void)
+static void install_h674_got_rebinding(void)
 {
-    if (gH673ScanPass >= 2) return;
-    ++gH673ScanPass;
+    if (gH674ScanPass >= 2) return;
+    ++gH674ScanPass;
     Dl_info self;
     const void *selfBase =
         dladdr((const void *)&h672_mach_msg, &self) ? self.dli_fbase : NULL;
-    const void *targets[4] = {
+    const void *targets[6] = {
         dlsym(RTLD_DEFAULT, "CFRunLoopObserverCreate"),
         dlsym(RTLD_DEFAULT, "bootstrap_look_up"),
         dlsym(RTLD_DEFAULT, "mach_msg"),
         dlsym(RTLD_DEFAULT, "mach_msg_overwrite"),
+        dlsym(RTLD_DEFAULT, "mach_msg2"),
+        dlsym(RTLD_DEFAULT, "mach_msg2_trap"),
     };
-    const void *replacements[4] = {
+    const void *replacements[6] = {
         (const void *)h672_obs_create,
         (const void *)h672_bootstrap_look_up,
         (const void *)h672_mach_msg,
         (const void *)h672_mach_msg_overwrite,
+        (const void *)&h674_msg2_stub,
+        (const void *)&h674_msg2trap_stub,
     };
+    gH674Ctl[6] = (uint64_t)(uintptr_t)targets[4];
+    gH674Ctl[7] = (uint64_t)(uintptr_t)targets[5];
+    if (gH672RenderPort != MACH_PORT_NULL)
+        gH674Ctl[8] = (uint64_t)gH672RenderPort;
     const uint32_t count = _dyld_image_count();
     for (uint32_t i = 0; i < count; ++i) {
         const struct mach_header_64 *mh =
             (const struct mach_header_64 *)_dyld_get_image_header(i);
         if (!mh || (const void *)mh == selfBase) continue;
         if (mh->magic != MH_MAGIC_64) continue;
-        h673_scan_image(mh, _dyld_get_image_vmaddr_slide(i), targets, replacements);
+        const char *name = _dyld_get_image_name(i);
+        if (name) {
+            const char *leaf = strrchr(name, '/');
+            name = leaf ? leaf + 1 : name;
+        } else {
+            name = "?";
+        }
+        h674_scan_image(mh, _dyld_get_image_vmaddr_slide(i), name,
+                        targets, replacements);
     }
-    if (gH673Swapped[0] || gH673Swapped[1] ||
-        gH673Swapped[2] || gH673Swapped[3])
-        gH672Flags |= 8;
+    for (int t = 0; t < 6; ++t)
+        if (gH674Swapped[t]) {
+            gH672Flags |= 8;
+            break;
+        }
 }
 
 static void publish_desktop_context_summary(unsigned created, unsigned onDisplay, unsigned withLayer,
                                             unsigned withContents, uint64_t lastId)
 {
-    install_h673_got_rebinding();
+    install_h674_got_rebinding();
     if (!connect_accelerator()) {
         line_reserved("event=h652_publish n=%u d1=%u lc=%u ct=%u id=0x%llx result=no-accelerator",
                       created, onDisplay, withLayer, withContents, lastId);
@@ -1150,13 +1239,26 @@ static void publish_desktop_context_summary(unsigned created, unsigned onDisplay
     memcpy(request.text, meta.text, sizeof meta.text);
     const kern_return_t status = IOConnectCallStructMethod(
         gConnection, gSelector, &request, sizeof request, NULL, NULL);
-    line_reserved("event=h652_publish n=%u d1=%u lc=%u ct=%u id=0x%llx bytes=%u st=0x%x h672 of=%llu mm=%llu mt=%llu ok=%llu sw=%llu/%llu/%llu/%llu",
+    line_reserved("event=h652_publish n=%u d1=%u lc=%u ct=%u id=0x%llx bytes=%u st=0x%x h672 of=%llu mm=%llu mt=%llu ok=%llu sw=%llu/%llu/%llu/%llu/%llu/%llu",
                   created, onDisplay, withLayer, withContents, lastId,
                   (unsigned) length, (unsigned) status,
                   (unsigned long long)gH672ObserverFires, (unsigned long long)gH672MachSends,
                   (unsigned long long)gH672MachTotal, (unsigned long long)gH672Flags,
-                  (unsigned long long)gH673Swapped[0], (unsigned long long)gH673Swapped[1],
-                  (unsigned long long)gH673Swapped[2], (unsigned long long)gH673Swapped[3]);
+                  (unsigned long long)gH674Swapped[0], (unsigned long long)gH674Swapped[1],
+                  (unsigned long long)gH674Swapped[2], (unsigned long long)gH674Swapped[3],
+                  (unsigned long long)gH674Swapped[4], (unsigned long long)gH674Swapped[5]);
+    if (!gH674Reported && (gH674Ctl[0] || gH674Ctl[1] || gH674Ctl[2] || gH674Ctl[3]))
+        gH672Flags |= 16;
+    if (!gH674Reported) {
+        gH674Reported = 1;
+        line_reserved("event=h674_state e=%llu,%llu,%llu,%llu s=%llu,%llu p=0x%llx ok=%llu",
+                      (unsigned long long)gH674Ctl[0], (unsigned long long)gH674Ctl[1],
+                      (unsigned long long)gH674Ctl[2], (unsigned long long)gH674Ctl[3],
+                      (unsigned long long)gH674Ctl[4], (unsigned long long)gH674Ctl[5],
+                      (unsigned long long)gH674Ctl[8], (unsigned long long)gH672Flags);
+        for (uint64_t i = 0; i < gH674LogCount; ++i)
+            line_reserved("event=h674_at %s", gH674Log[i]);
+    }
 }
 
 static void emit_internal(const char *text, bool reserved)
@@ -2973,11 +3075,11 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
     h672_install_ca_observer_anchor();
-    install_h673_got_rebinding();
+    install_h674_got_rebinding();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H673", process, getpid());
+    line("observer load process=%s pid=%d build=H674", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

@@ -771,12 +771,20 @@ static unsigned gHostClassCount;
  * Set and Get run back to back on this same connection and both return codes, the stored call
  * count, the length and the read-back text go on one srvpub line. A read-back showing sb is not
  * by itself a rejection, because SpringBoard writes the same single slot. */
-static void publish_backboardd_summary(uint32_t contextId)
+static void publish_backboardd_summary(void)
 {
     NativeAdrenoAbiMetadata meta;
     memset(&meta, 0, sizeof meta);
-    const int length = snprintf(meta.text, sizeof meta.text, "bb H%u/%u id=0x%x",
-                                gHostClassMatched, gHostClassCount, contextId);
+    /* H664: name the process that counted.  The plugin is loaded by more than one process,
+     * so a file-scope counter only means something together with the process that wrote it. */
+    const int length = gPublishedDesktopId
+        ? snprintf(meta.text, sizeof meta.text, "bb %.10s/%d H%u/%u id=0x%x",
+                   getprogname() ? getprogname() : "?", getpid(),
+                   gHostClassMatched, gHostClassCount,
+                   (unsigned) gPublishedDesktopId)
+        : snprintf(meta.text, sizeof meta.text, "bb %.10s/%d H%u/%u",
+                   getprogname() ? getprogname() : "?", getpid(),
+                   gHostClassMatched, gHostClassCount);
     if (length <= 0 || (size_t) length >= sizeof meta.text || gHostClassCount == 0) {
         return;
     }
@@ -848,11 +856,6 @@ static void query_published_desktop_context(const char *why, id server)
     const uint32_t cid = (uint32_t) published;
     /* H662: publish once per boot, right after the desktop context id is known, so the text
      * keeps the id= field that this same query has to parse. */
-    static bool summaryPublished;
-    if (!summaryPublished && gHostClassCount != 0) {
-        summaryPublished = true;
-        publish_backboardd_summary(cid);
-    }
 
     const uint32_t client = observer_u32_arg(server, "clientPortOfContextId:", cid, 0);
     const uint32_t task = observer_u32_arg(server, "taskNamePortOfContextId:", cid, 0);
@@ -2131,6 +2134,13 @@ static void probe_display_frame(const char *why)
                      * collected every round, and sets and reads back on one connection. */
                     gHostClassMatched = matched;
                     gHostClassCount = classCount;
+                    /* H664: publish from here, in the process that just counted.  H663 gated the
+                     * publish on these counters from a different function and the gate was never
+                     * satisfied, which is only consistent with the two sides running in different
+                     * processes. */
+                    if (matched > 0 || classCount > 0) {
+                        publish_backboardd_summary();
+                    }
                 }
             }
             /* H294's setContext: attempt is intentionally retired.  H416 is an
@@ -2411,7 +2421,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H663");
+    caller("builder", "build", "H664");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

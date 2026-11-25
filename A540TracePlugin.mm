@@ -2115,61 +2115,45 @@ static void probe_display_frame(const char *why)
             id displays = observer_object(srv, "displays");
             const unsigned long long n = observer_u64(displays, "count", 0);
             id d0 = n ? ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(displays, @selector(objectAtIndex:), 0) : nil;
-            /* H684: the d0ctx/d0scale fields are getter artifacts. The
-             * dumped CAWindowServerDisplay method list has no "context"
-             * or "pointScale" accessor, so both reads say UNSUPPORTED
-             * and dctx was always nil - "d0ctx=0" measured the observer,
-             * not the binding. Bounded read-only verification: dump the
-             * ivar list, read pointer ivars that name a context/layer/
-             * surface/link directly (same-process object, ivar offsets
-             * from the runtime), and cross-check the read path with the
-             * "name" getter as positive control. */
+            /* H684b: the d0ctx/d0scale fields are getter artifacts (the
+             * CAWindowServerDisplay method list has no context or
+             * pointScale accessor), so those fields measured the
+             * observer, not the binding. Bounded read-only dump: every
+             * ivar of the display object (name, type, offset, pointer
+             * value, class for object ivars), plus the name getter's
+             * pointer as the read-path positive control. */
             static bool h684Shown;
             if (d0 && !h684Shown) {
                 h684Shown = true;
                 unsigned ic = 0;
                 Ivar *ivs = class_copyIvarList(object_getClass(d0), &ic);
-                char ib[200];
-                snprintf(ib, sizeof ib, "ivars H684 count=%u cls=%.40s", ic,
-                         object_getClassName(d0));
-                caller("d0", "h684", ib);
                 id nameGet = observer_object(d0, "name");
-                for (unsigned i = 0; ivs && i < ic && i < 26; ++i) {
+                char ib[200];
+                snprintf(ib, sizeof ib,
+                         "ivars H684 count=%u cls=%.40s name=0x%llx", ic,
+                         object_getClassName(d0),
+                         (unsigned long long)(__bridge void *)nameGet);
+                caller("d0", "h684", ib);
+                for (unsigned i = 0; ivs && i < ic && i < 24; ++i) {
                     const char *nm = ivar_getName(ivs[i]);
                     const char *tp = ivar_getTypeEncoding(ivs[i]);
                     ptrdiff_t of = ivar_getOffset(ivs[i]);
-                    if (!nm || of <= 0) {
-                        continue;
-                    }
-                    if (strcmp(nm, "name") == 0 && tp && tp[0] == '@') {
-                        uintptr_t v = 0;
+                    uintptr_t v = 0;
+                    bool ptrish = tp && (tp[0] == '@' || tp[0] == '^') &&
+                        of > 0;
+                    if (ptrish) {
                         memcpy(&v, (const char *)(__bridge void *)d0 + of,
                                sizeof v);
-                        snprintf(ib, sizeof ib,
-                                 "ctl name getter=%d ivar=%d match=%d",
-                                 nameGet ? 1 : 0, v ? 1 : 0,
-                                 (uintptr_t)(__bridge void *)nameGet == v);
-                        caller("d0", "h684", ib);
-                        continue;
                     }
-                    bool ptrish = tp && (tp[0] == '@' || tp[0] == '^');
-                    if (!ptrish || !(strstr(nm, "ontext") ||
-                        strstr(nm, "ayer") || strstr(nm, "urface") ||
-                        strstr(nm, "ink"))) {
-                        continue;
-                    }
-                    uintptr_t v = 0;
-                    memcpy(&v, (const char *)(__bridge void *)d0 + of, sizeof v);
-                    if (v != 0 &&
-                        (v < 0x100000000ULL || v > 0x8000000000ULL)) {
-                        v = 0; /* implausible: report as null only */
+                    const char *vc = "-";
+                    if (ptrish && v != 0 && tp[0] == '@' &&
+                        v >= 0x100000000ULL && v <= 0x8000000000ULL) {
+                        vc = object_getClassName((__bridge id)(void *)v);
                     }
                     snprintf(ib, sizeof ib,
-                             "ivar %.30s off=0x%lx v=0x%llx cls=%.40s",
-                             nm, (unsigned long)of,
-                             (unsigned long long)v,
-                             (v && tp[0] == '@')
-                                 ? object_getClassName((__bridge id)(void *)v) : "-");
+                             "iv %.2s n=%u %.30s off=0x%lx v=0x%llx cls=%.40s",
+                             tp ? tp : "??", i, nm ? nm : "-",
+                             (unsigned long)of, (unsigned long long)v, vc);
                     caller("d0", "h684", ib);
                 }
             }

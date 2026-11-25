@@ -803,6 +803,10 @@ static void publish_backboardd_summary(const char *stage)
                    stage, getprogname() ? getprogname() : "?", getpid(),
                    gHostClassMatched, gHostClassCount, token);
     if (length <= 0 || (size_t) length >= sizeof meta.text) {
+        /* H667: this was the only silent path left in the publisher. */
+        char abort[160];
+        snprintf(abort, sizeof abort, "st=%.1s abort=format len=%d pid=%d", stage, length, getpid());
+        caller("srvpub", "roundtrip", abort);
         return;
     }
     meta.bytes = (uint32_t) length;
@@ -2081,13 +2085,13 @@ static void probe_display_frame(const char *why)
             const unsigned long long nctx = observer_u64(all, "count", 0);
             char state[240];
             snprintf(state, sizeof state,
-                     "%s displays=%llu d0id=0x%x d0scale=%u d0bounds=%.0fx%.0f d0ctx=%d d0ctxType=%s d0layer=%s d0layerType=%s renderer=%llu ctxs=%llu",
+                     "%s displays=%llu d0id=0x%x d0scale=%u d0bounds=%.0fx%.0f d0ctx=%d d0ctxType=%s d0layer=%s d0layerType=%s renderer=%llu ctxs=%llu pid=%d",
                      why, n, d0id, d0scale, d0bounds.size.width, d0bounds.size.height,
                      dctx ? 1 : 0,
                      observer_encoding(d0, "context") ? observer_encoding(d0, "context") : "UNSUPPORTED",
                      dlayer ? object_getClassName(dlayer) : "-",
                      observer_encoding(d0, "layer") ? observer_encoding(d0, "layer") : "UNSUPPORTED",
-                     flags, nctx);
+                     flags, nctx, getpid());
             caller("srv", "state", state);
             /* H292: the display has no context while two exist.  Describe each one:
              * its id, client port, layer class, layer bounds, sublayer count and whether
@@ -2438,7 +2442,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H666");
+    caller("builder", "build", "H667");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

@@ -761,9 +761,9 @@ static uint32_t abi_call_rc(uint32_t method, const void *input, size_t inputSize
  * backboardd summary can be published without destroying the field the A2 query parses. */
 static uint64_t gPublishedDesktopId;
 static unsigned gPublishToken;
-/* H669: the two samples reported on one srvpub line.  q* is taken from the Q path where the
+/* H669: the two samples reported on one srvpub line.  q* comes from the Q path where the
  * connection is proven and the desktop id is known; e* is taken in memory only from the
- * constructor-time inventory block, which has no usable output channel that early. */
+ * constructor-time block, which has no usable output channel that early. */
 static int gQInventoryRan;
 static int gQInventoryList;
 static unsigned gQInventoryTotal;
@@ -788,10 +788,10 @@ static unsigned gEInventoryMatched;
 /* H669: a bounded class-list sample that only returns results.
  *
  * H668 proved the Q path can Set and Get, but the published counts read H0/0, which cannot yet
- * tell "never sampled" from "genuinely zero".  Sampling therefore runs here, once, from the Q path
- * where the connection is known good and the desktop context id of this boot is already read, and
- * reports ran/list/total/matched separately so the four states stay distinguishable.  It prints
- * nothing itself; the existing srvpub round-trip line carries the numbers. */
+ * tell never-sampled from genuinely-zero.  Sampling therefore runs once from the Q path, where
+ * the connection is known good and this boot's desktop context id is already read, and reports
+ * ran/list/total/matched separately so the four states stay distinguishable.  It prints nothing
+ * itself; the existing srvpub round-trip line carries the numbers. */
 static void sample_class_inventory(unsigned *total, unsigned *matched, int *listPresent)
 {
     unsigned classCount = 0;
@@ -860,7 +860,8 @@ static void publish_backboardd_summary(const char *stage)
     snprintf(detail, sizeof detail,
              "st=%.1s set=0x%x get=0x%x count=%llu same=%d pid=%d q=%d/%d/%u/%u e=%d/%d/%u/%u want=%.24s",
              stage, (unsigned) setStatus, (unsigned) getStatus,
-             (unsigned long long) readBack.handle, same, getpid(),
+             (unsigned long long) readBack.handle, (unsigned) meta.bytes,
+             (unsigned) readBack.bytes, same, getpid(),
              gQInventoryRan, gQInventoryList, gQInventoryTotal, gQInventoryMatched,
              gEInventoryRan, gEInventoryList, gEInventoryTotal, gEInventoryMatched,
              meta.text);
@@ -912,9 +913,10 @@ static void query_published_desktop_context(const char *why, id server)
         return;
     }
     gPublishedDesktopId = published;
-    /* H669: sample once, here, where the connection is proven and this boot's desktop
-     * context id is already in hand, then publish.  The numbers ride the same srvpub line, so
-     * this adds no new log volume. */
+    /* H668: publish from here, the path H662 proved collectable.  H664 moved the call
+     * into the class inventory, which runs from the bundle constructor before the
+     * accelerator connection exists, so its three passes were spent on output that
+     * could not be delivered and the gate then closed for good. */
     if (!gQInventoryRan) {
         gQInventoryRan = 1;
         sample_class_inventory(&gQInventoryTotal, &gQInventoryMatched, &gQInventoryList);
@@ -2174,16 +2176,15 @@ static void probe_display_frame(const char *why)
              * one priority line, which uses a reserved slot, and repeats it on the first
              * three passes so at least one lands inside the retained window. */
             {
-                /* H669: memory only.  This block runs from the bundle constructor,
-                 * before the accelerator connection exists, so anything printed here is
-                 * dropped.  The numbers are read out on the Q path's srvpub line instead,
-                 * and the strncat name building goes with it, which removes the
-                 * underflow risk in its length arithmetic. */
+                /* H669: memory only.  This block runs from the bundle constructor, before the
+                 * accelerator connection exists, so anything printed here is dropped.  The
+                 * numbers are read out on the Q path's srvpub line instead, and the strncat
+                 * name building goes with it, which removes the underflow risk in its length
+                 * arithmetic. */
                 if (!gEInventoryRan) {
                     gEInventoryRan = 1;
                     sample_class_inventory(&gEInventoryTotal, &gEInventoryMatched,
                                            &gEInventoryList);
-                }
                 }
             }
             /* H294's setContext: attempt is intentionally retired.  H416 is an

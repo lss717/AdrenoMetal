@@ -13,7 +13,8 @@
 #include <mach/mach.h>
 #include <mach/arm/thread_status.h>
 #include <mach/thread_act.h>
-#include <mach-o/dyld.h> #include <mach-o/loader.h>
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 // servers/bootstrap.h is not in the public SDK; the prototype is stable.
 extern "C" kern_return_t bootstrap_look_up(mach_port_t bp, const char *service_name, mach_port_t *sp);
 #include <sys/proc.h>

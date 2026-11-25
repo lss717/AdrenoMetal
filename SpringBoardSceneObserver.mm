@@ -971,20 +971,6 @@ static CFRunLoopObserverRef h672_obs_create(CFAllocatorRef allocator,
     return CFRunLoopObserverCreate(allocator, activities, repeats, order, callback, context);
 }
 
-static CFRunLoopObserverRef h672_obs_create_with_attributes(
-    CFAllocatorRef allocator, CFOptionFlags activities, Boolean repeats, CFIndex order,
-    CFRunLoopObserverCallBack callback, CFArrayRef signalers,
-    CFRunLoopObserverContext *context)
-{
-    if (callback && gH672CaObserverCallback &&
-        (uintptr_t)callback == gH672CaObserverCallback) {
-        gH672RealObserverCallback = callback;
-        gH672Flags |= 1;
-        callback = h672_ca_observer_wrapper;
-    }
-    return CFRunLoopObserverCreateWithAttributes(allocator, activities, repeats, order,
-                                                 callback, signalers, context);
-}
 
 static kern_return_t h672_bootstrap_look_up(mach_port_t bp, const char *service_name,
                                             mach_port_t *sp)
@@ -1000,7 +986,7 @@ static kern_return_t h672_bootstrap_look_up(mach_port_t bp, const char *service_
 
 static inline void h672_count_send(const mach_msg_header_t *msg, mach_msg_option_t option)
 {
-    ++gH672MachTotal;
+    /* Only calls from other images reach this wrapper (dyld keeps the
     gH672Flags |= 2;
     if (gH672RenderPort != MACH_PORT_NULL && (option & MACH_SEND_MSG) &&
         msg && msg->msgh_remote_port == gH672RenderPort) {
@@ -1027,12 +1013,6 @@ static kern_return_t h672_mach_msg_overwrite(mach_msg_header_t *msg,
                               rcv_msg, rcv_name, timeout, notify);
 }
 
-static kern_return_t h672_mach_msg2(mach_msg_header_t *msg, uint32_t option,
-                                    uint64_t *kmsg, mach_msg2_trailer_t *trailer)
-{
-    h672_count_send(msg, (mach_msg_option_t)option);
-    return mach_msg2(msg, option, kmsg, trailer);
-}
 
 __attribute__((used, section("__DATA,__interpose")))
 static const DyldInterpose gH672Interpose[] = {
@@ -1040,10 +1020,7 @@ static const DyldInterpose gH672Interpose[] = {
         (const void *) h672_obs_create,
         (const void *) CFRunLoopObserverCreate,
     },
-    {
-        (const void *) h672_obs_create_with_attributes,
-        (const void *) CFRunLoopObserverCreateWithAttributes,
-    },
+
     {
         (const void *) h672_bootstrap_look_up,
         (const void *) bootstrap_look_up,
@@ -1056,10 +1033,7 @@ static const DyldInterpose gH672Interpose[] = {
         (const void *) h672_mach_msg_overwrite,
         (const void *) mach_msg_overwrite,
     },
-    {
-        (const void *) h672_mach_msg2,
-        (const void *) mach_msg2,
-    },
+
 };
 
 static void publish_desktop_context_summary(unsigned created, unsigned onDisplay, unsigned withLayer,

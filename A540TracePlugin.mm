@@ -740,7 +740,7 @@ static void census_server_context_table(const char *why, id server)
 static void probe_display_context_positions(const char *why, id server)
 {
     static unsigned rounds;
-    if (!server || rounds >= 8) {
+    if (!server || rounds >= 16) {
         return;
     }
     ++rounds;
@@ -2187,7 +2187,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H646");
+    caller("builder", "build", "H647");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */
@@ -2237,7 +2237,24 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
      * needs rounds that land after that point. These blocks are queued on the same utility queue
      * as the census blocks but registered before them, so they are independent of anything the
      * census does afterwards. */
-    const double positionDelays[] = {30.0, 120.0, 300.0, 480.0};
+    /* H647: repeat the position probe every 60 s out to 900 s.
+     *
+     * H646 could not be read at all. The iOS USB device controller came up but the host's
+     * GET_DESCRIPTOR failed, so there was no CDC, no adb and no fastboot, and the ring cannot be
+     * read without restarting into recovery, which needs a button press. By the time a channel
+     * could exist again the ring had rotated: it holds 247 slots and the flush advances roughly one
+     * slot every two seconds, so retention is about 494 s. Four one-shot probe rounds at 382/472/
+     * 652/832 s simply fall out of the window.
+     *
+     * A repeating probe fixes that without depending on the live channel: whatever the newest
+     * result is, it is always inside the retained window, so any later ring pull reads it. It also
+     * keeps sampling after SpringBoard creates its context (582.99 s in H645) instead of stopping
+     * 61 s before. Load is bounded: 15 blocks, each capped by the rounds guard, each doing at most
+     * 4 positions times 4 exclusion steps. */
+    double positionDelays[15];
+    for (unsigned i = 0; i < 15; ++i) {
+        positionDelays[i] = 60.0 * (double) (i + 1);
+    }
     for (double delay : positionDelays) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)),
                        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{

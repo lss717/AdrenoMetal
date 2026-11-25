@@ -721,6 +721,106 @@ static void census_server_context_table(const char *why, id server)
     }
 }
 
+/* H645: a bounded position probe on the render server's own display object.
+ *
+ * Why this can be an A2 candidate: contextIdAtPosition:excludingContextIds: is asked of the
+ * display, and the display is the object the server routes client content to, so an id it returns
+ * may belong to another process. The id itself is a scalar, so this probe creates no mach right
+ * and has no return lifetime to manage. clientPortAtPosition: would return a port whose lifetime
+ * in the caller is unestablished, so its encoding is reported and it is never called.
+ *
+ * What it cannot show on its own: the coordinate space is not stated anywhere in the ABI. The
+ * display reports bounds 1080x1920 while the desktop layer is 360x640 at scale 3, so a miss could
+ * simply mean the sampled points are outside the space the selector expects. Positions are therefore
+ * chosen to sit inside both interpretations, the call count is capped, and the exclusion list is
+ * used to iterate at a position rather than scanning a grid. A result that yields only ids already
+ * known to belong to this process, or yields nothing, says the sampled positions did not hit; it
+ * does not establish the scope of the interface and does not say an external context is
+ * unregistered. */
+static void probe_display_context_positions(const char *why, id server)
+{
+    static unsigned rounds;
+    if (!server || rounds >= 4) {
+        return;
+    }
+    ++rounds;
+
+    char detail[220];
+    id displays = observer_object(server, "displays");
+    const unsigned long long count = displays ? observer_u64(displays, "count", 0) : 0;
+    if (!count) {
+        snprintf(detail, sizeof detail, "%s no-displays", why);
+        caller("srvpos", "abort", detail);
+        return;
+    }
+    id display = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(
+        displays, @selector(objectAtIndex:), 0ULL);
+    if (!display) {
+        snprintf(detail, sizeof detail, "%s display-nil", why);
+        caller("srvpos", "abort", detail);
+        return;
+    }
+
+    /* ABI first. The coordinate argument must arrive as a struct and the exclusion argument as an
+     * object, and the return must be scalar. Anything else and the call is not attempted. */
+    const char *enc = observer_encoding(display, "contextIdAtPosition:excludingContextIds:");
+    const bool shape = enc && strchr("IQilq", enc[0]) && strchr(enc, '{') && strchr(enc, '@');
+    snprintf(detail, sizeof detail,
+             "%s abi enc=%.40s usable=%d bounds=%.0fx%.0f", why, enc ? enc : "-", shape ? 1 : 0,
+             observer_rect(display, "bounds", CGRectMake(0, 0, 0, 0)).size.width,
+             observer_rect(display, "bounds", CGRectMake(0, 0, 0, 0)).size.height);
+    caller("srvpos", "abi", detail);
+    if (!shape) {
+        return;
+    }
+    const char *portEnc = observer_encoding(display, "clientPortAtPosition:");
+    snprintf(detail, sizeof detail, "%s port_encoding enc=%.40s called=0", why,
+             portEnc ? portEnc : "-");
+    caller("srvpos", "port", detail);
+
+    /* Four positions: the top-left corner and three points that lie inside the display bounds
+     * under both the pixel reading and the point reading. */
+    static const CGFloat xs[] = { 1.0, 540.0, 180.0, 540.0 };
+    static const CGFloat ys[] = { 1.0, 960.0, 320.0, 60.0 };
+    NSMutableArray *excluded = [NSMutableArray array];
+    for (unsigned p = 0; p < 4; ++p) {
+        const CGPoint point = CGPointMake(xs[p], ys[p]);
+        for (unsigned step = 0; step < 4 && [excluded count] < 8; ++step) {
+            uint32_t cid = 0;
+            @try {
+                cid = (uint32_t) ((unsigned long long (*)(id, SEL, CGPoint, id)) objc_msgSend)(
+                    display, sel_getUid("contextIdAtPosition:excludingContextIds:"),
+                    point, excluded);
+            } @catch (id ignored) {
+                snprintf(detail, sizeof detail, "%s pos(%.0f,%.0f) step=%u threw=1", why,
+                         point.x, point.y, step);
+                caller("srvpos", "throw", detail);
+                break;
+            }
+            snprintf(detail, sizeof detail, "%s pos(%.0f,%.0f) step=%u excluded=%lu id=0x%x",
+                     why, point.x, point.y, step, (unsigned long) [excluded count], cid);
+            caller("srvpos", "found", detail);
+            if (cid == 0 || cid == UINT32_MAX) {
+                break;
+            }
+            [excluded addObject:@(cid)];
+            /* Same lookup interface that was calibrated in H643, so the owner is read the same way
+             * and the local/adjacent/invalid controls stay comparable. */
+            const uint32_t task =
+                observer_u32_arg(server, "taskNamePortOfContextId:", cid, 0);
+            int owner = -1;
+            kern_return_t st = KERN_FAILURE;
+            if (task) {
+                st = pid_for_task((mach_port_name_t) task, &owner);
+                mach_port_deallocate(mach_task_self(), (mach_port_name_t) task);
+            }
+            snprintf(detail, sizeof detail, "%s owner id=0x%x task=0x%x pid=%d st=0x%x",
+                     why, cid, task, owner, (unsigned) st);
+            caller("srvpos", "owner", detail);
+        }
+    }
+}
+
 static void probe_displays(const char *why)
 {
     mach_port_t service = MACH_PORT_NULL, bootstrap = MACH_PORT_NULL;
@@ -2087,7 +2187,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H644");
+    caller("builder", "build", "H645");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */
@@ -2143,6 +2243,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
             @try { srv_now = ((id (*)(id, SEL)) objc_msgSend)(serverClass, @selector(serverIfRunning)); }
             @catch (id ignored) { srv_now = nil; }
             census_server_context_table("observer", srv_now);
+            probe_display_context_positions("observer", srv_now);
             /* H634: the render encoders report binds=0 draws=0 dispatch=0 and
              * -newTextureWithDescriptor:iosurface:plane: is never called, so
              * the open question is whether a drawable can be obtained at all.

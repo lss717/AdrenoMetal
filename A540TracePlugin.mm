@@ -1444,15 +1444,32 @@ static void __attribute__((unused)) probe_first_frame(const char *why)
  *
  * This touches the live display for the duration of one boot; nothing is written to
  * the device and a reboot restores the previous state. */
+/* H644: dump_class and dump_methods each guarded themselves with one shared static bool, so the
+ * first call for any tag silenced every later tag. The constructor calls dump_class("server")
+ * first, which means the lists for "disp", "ctxcls", "ctxmaker", "d0" and "c0" were never printed
+ * in any round. Those are the selector lists where a CoreAnimation transaction boundary would
+ * show up, so their absence is why the receive boundary has never been identified from evidence.
+ * The guard is per tag now, with its own table in each function. */
+static bool dump_tag_seen(const char *tag, const char **seen, unsigned capacity, unsigned *count)
+{
+    for (unsigned i = 0; i < *count; ++i) {
+        if (strcmp(seen[i], tag) == 0) {
+            return true;
+        }
+    }
+    if (*count < capacity) {
+        seen[(*count)++] = tag;
+    }
+    return false;
+}
+
 static void dump_class(const char *tag, id object)
 {
-    /* H272o bug 4: called on every tick once the device-init timers are reliable;
-     * the menus never change, so print them once. */
-    static bool done;
-    if (done) {
+    static const char *seen[8];
+    static unsigned seen_count;
+    if (dump_tag_seen(tag, seen, 8, &seen_count)) {
         return;
     }
-    done = true;
     if (!object) {
         caller("dump", tag, "nil");
         return;
@@ -1488,11 +1505,11 @@ static void dump_class(const char *tag, id object)
  * ran" cannot be confused. */
 static void dump_methods(const char *tag, Class cls, const char **words, unsigned wordCount)
 {
-    static bool done;
-    if (done) {
+    static const char *seen[8];
+    static unsigned seen_count;
+    if (dump_tag_seen(tag, seen, 8, &seen_count)) {
         return;
     }
-    done = true;
     unsigned count = 0;
     Method *methods = class_copyMethodList(cls, &count);
     char line[190];
@@ -2070,7 +2087,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H643");
+    caller("builder", "build", "H644");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */
@@ -2109,6 +2126,9 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     if (ctxClass) {
         dump_class("ctxcls", (id) ctxClass);
         dump_methods("ctxmaker", object_getClass((id) ctxClass), NULL, 0);
+        /* H644: the existing dump used the metaclass, so it listed CAContext class methods only.
+         * The transaction paths are instance methods, and they have never been listed. */
+        dump_methods("ctxinst", (Class) ctxClass, NULL, 0);
     }
     const double delays[] = {30.0, 120.0, 300.0, 480.0};
     for (double delay : delays) {

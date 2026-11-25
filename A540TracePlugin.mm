@@ -1881,13 +1881,12 @@ static void probe_display_frame(const char *why)
         dump_observer_encodings("CAWindowServerDisplay", display, displayNames,
                                 (unsigned) (sizeof displayNames / sizeof displayNames[0]));
         {
-            static const char *words[] = {
-                "ontext", "ayer", "urface", "resent", "wap", "oot", "ost",
-                "ree", "uffer", "rawable", "indow", "ort", "rame", "_"
-            };
             dump_methods("server", object_getClass(server), NULL, 0);
-            dump_methods("disp", object_getClass(display), words,
-                         (unsigned) (sizeof words / sizeof words[0]));
+            /* H650: this is the call site that actually runs. The one edited in H649 sits in the
+             * bundle constructor, where the server reports displays=0, so it never executed and
+             * H649 still printed count disp total=243 matched=33 filter=on. The dump line states
+             * its own filter state, which is what made that visible. */
+            dump_methods("disp", object_getClass(display), NULL, 0);
             Class ctxClass = NSClassFromString(@"CAContext");
             dump_class("ctxcls", (id) ctxClass);
             if (ctxClass) {
@@ -2276,7 +2275,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H649");
+    caller("builder", "build", "H650");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

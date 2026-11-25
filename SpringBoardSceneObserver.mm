@@ -921,7 +921,7 @@ static int gTxControlHit;
 
 /* control block shared with the H674 asm stubs (layout documented at the
  * install_h674_got_rebinding definition below) */
-extern "C" uint64_t gH674Ctl[12] __attribute__((aligned(64)));
+extern "C" uint64_t gH674Ctl[12] __attribute__((aligned(64))) = { 0 };
 
 /* H672: observe the transaction commit entry and the real send boundary from
  * inside SpringBoard WITHOUT touching any page. The 21H461 audit (STATUS 379/

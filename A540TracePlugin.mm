@@ -777,7 +777,7 @@ static void publish_backboardd_summary(uint32_t contextId)
     memset(&meta, 0, sizeof meta);
     const int length = snprintf(meta.text, sizeof meta.text, "bb H%u/%u id=0x%x",
                                 gHostClassMatched, gHostClassCount, contextId);
-    if (length <= 0 || (size_t) length >= sizeof meta.text) {
+    if (length <= 0 || (size_t) length >= sizeof meta.text || gHostClassCount == 0) {
         return;
     }
     meta.bytes = (uint32_t) length;
@@ -791,7 +791,7 @@ static void publish_backboardd_summary(uint32_t contextId)
     readBack.text[sizeof readBack.text - 1] = 0;
     char detail[220];
     snprintf(detail, sizeof detail,
-             "roundtrip set=0x%x get=0x%x setBytes=%u count=%llu got=%u text=%.44s",
+             "set=0x%x get=0x%x setBytes=%u count=%llu got=%u text=%.44s",
              (unsigned) setStatus, (unsigned) getStatus, (unsigned) meta.bytes,
              (unsigned long long) readBack.handle, (unsigned) readBack.bytes, readBack.text);
     caller("srvpub", "roundtrip", detail);
@@ -849,7 +849,7 @@ static void query_published_desktop_context(const char *why, id server)
     /* H662: publish once per boot, right after the desktop context id is known, so the text
      * keeps the id= field that this same query has to parse. */
     static bool summaryPublished;
-    if (!summaryPublished) {
+    if (!summaryPublished && gHostClassCount != 0) {
         summaryPublished = true;
         publish_backboardd_summary(cid);
     }
@@ -2411,7 +2411,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H662");
+    caller("builder", "build", "H663");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

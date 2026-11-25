@@ -151,6 +151,18 @@ static void emit_priority(const char *text)
     if (gConnection) emit_raw(text);
 }
 
+/* H660: one-line summary of the Host/RenderServer classes seen in this process, filled by
+ * probe_display_frame and reported on the observe-only line, which arrives every pass. */
+static char gHostClassSummary[200];
+
+static const char *hostClassSummary(const char *why)
+{
+    static char joined[240];
+    snprintf(joined, sizeof joined, "%s %s", why,
+             gHostClassSummary[0] ? gHostClassSummary : "hosts=pending");
+    return joined;
+}
+
 static void caller(const char *cls, const char *sel, const char *detail)
 {
     char line[256];
@@ -2071,7 +2083,11 @@ static void probe_display_frame(const char *why)
                     char detail[200];
                     snprintf(detail, sizeof detail, "pass=%u classes=%u matched=%u %s",
                              hostedClassPasses, classCount, matched, names);
-                    caller_priority("host", "classes", detail);
+                                        /* H660: carry the answer on a line that is known to arrive.  H658 sent a
+                     * burst and H659 sent one priority line, and neither appeared even though
+                     * emit_priority has no budget, so the summary rides on the observe-only
+                     * line instead of standing on its own. */
+                    snprintf(gHostClassSummary, sizeof gHostClassSummary, "%s", detail);
                 }
             }
             /* H294's setContext: attempt is intentionally retired.  H416 is an
@@ -2100,7 +2116,7 @@ static void probe_display_frame(const char *why)
             }
             caller("srv", "bind", "skipped-observer-only");
         }
-        caller("disp", "observe-only", why);
+        caller("disp", "observe-only", hostClassSummary(why));
         return;
 
 #if 0
@@ -2352,7 +2368,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H659");
+    caller("builder", "build", "H660");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

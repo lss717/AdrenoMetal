@@ -567,6 +567,37 @@ static void h655_walk(unsigned delay, uint64_t pc, uint64_t lr, uint64_t fp)
     }
     line("event=h655_stall_walk delay=%u frames=%u stop=%s", delay, index, stop);
 }
+/* H657: name the Mach call the sampled thread is sitting inside.
+ *
+ * The frame chain cannot leave _mach_msg, but thread_get_state already returned every
+ * general-purpose register, and while the thread waits on the SVC the arguments are still
+ * in them: x0 message buffer, x1 send size, x2 receive size, x3 options, x4 receive port,
+ * x5 timeout, x6 send port. The 24-byte header at x0 is read in this process, so nothing
+ * here changes what the thread is doing. */
+static void h657_pending_ipc(unsigned delay, const arm_thread_state64_t *state)
+{
+    line("event=h657_stall_args delay=%u x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x4=0x%llx x5=0x%llx x6=0x%llx",
+         delay,
+         (unsigned long long)state->__x[0], (unsigned long long)state->__x[1],
+         (unsigned long long)state->__x[2], (unsigned long long)state->__x[3],
+         (unsigned long long)state->__x[4], (unsigned long long)state->__x[5],
+         (unsigned long long)state->__x[6]);
+
+    const uint64_t buffer = state->__x[0] & kH655PointerMask;
+    uint64_t words[3] = { 0, 0, 0 };
+    unsigned read = 0;
+    for (unsigned index = 0; index < 3; ++index) {
+        if (!h655_read_word(buffer + index * sizeof(uint64_t), &words[index])) {
+            break;
+        }
+        ++read;
+    }
+    line("event=h657_stall_msg delay=%u buffer=0x%llx read=%u bits=0x%x size=%u remote=0x%x local=0x%x reserved=0x%x id=%d",
+         delay, (unsigned long long)buffer, read,
+         (unsigned)(words[0] & 0xFFFFFFFFull), (unsigned)(words[0] >> 32),
+         (unsigned)(words[1] & 0xFFFFFFFFull), (unsigned)(words[1] >> 32),
+         (unsigned)(words[2] & 0xFFFFFFFFull), (int)(words[2] >> 32));
+}
 static void *sample_main_thread_after_setup_return(void *context)
 {
     mach_port_t thread = (mach_port_t)(uintptr_t)context;
@@ -599,6 +630,7 @@ static void *sample_main_thread_after_setup_return(void *context)
         lastPc = state.__pc;
         if (walks < 2 && (repeated || (delays[index] == 30 && walks == 0))) {
             ++walks;
+            h657_pending_ipc(delays[index], &state);
             h655_walk(delays[index], state.__pc, state.__lr, state.__fp);
         }
     }
@@ -2702,7 +2734,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H656", process, getpid());
+    line("observer load process=%s pid=%d build=H657", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

@@ -808,6 +808,46 @@ static void query_published_desktop_context(const char *why, id server)
              why, cid, client, task, host, owner, (unsigned) pidStatus);
     caller("srvpub", "query", detail);
 
+    /* H651: the server-side view of that same context.
+
+     * The complete CAWindowServerDisplay selector list from H650 (243 names, filter=off) has no
+     * attach/addContext/host entry at all, only clones and notification registration, so
+     * "mounted on the display" is not something the display exposes directly. What the display
+     * does have is a displayId, and CAContext objects have one too. +[CAContext contextWithId:]
+     * was listed in H647 and is the way to reach the server's own object for an id that belongs
+     * to another process, so this reads its displayId, its layer, and whether that layer carries
+     * contents or sublayers. Compared against the display's own displayId that is a direct
+     * statement about whether the desktop context is pointed at this display at all.
+
+     * The class method is only called when its encoding says scalar-in object-out, so a
+     * differently shaped +contextWithId: is reported rather than invoked. */
+    {
+        Class ctxClass = NSClassFromString(@"CAContext");
+        const SEL byId = sel_getUid("contextWithId:");
+        const Method cm = ctxClass ? class_getClassMethod(ctxClass, byId) : NULL;
+        const char *enc = cm ? method_getTypeEncoding(cm) : NULL;
+        snprintf(detail, sizeof detail, "%s byid present=%d enc=%.24s", why, cm ? 1 : 0,
+                 enc ? enc : "-");
+        caller("srvpub", "byid", detail);
+        if (cm && enc && enc[0] == '@' && strchr(enc, 'I')) {
+            id ctx = nil;
+            @try {
+                ctx = ((id (*)(Class, SEL, uint32_t)) objc_msgSend)(ctxClass, byId, cid);
+            } @catch (id ignored) { ctx = nil; }
+            const uint32_t gotId = observer_u32(ctx, "contextId", UINT32_MAX);
+            const uint32_t ctxDisplay = observer_u32(ctx, "displayId", UINT32_MAX);
+            id layer = observer_object(ctx, "layer");
+            id contents = observer_object(layer, "contents");
+            const unsigned long long subs = observer_u64(observer_object(layer, "sublayers"), "count", 0);
+            snprintf(detail, sizeof detail,
+                     "%s byid obj=%d cls=%.20s id=0x%x displayId=0x%x layer=%s contents=%s subs=%llu",
+                     why, ctx ? 1 : 0, ctx ? object_getClassName(ctx) : "-", gotId, ctxDisplay,
+                     layer ? object_getClassName(layer) : "-",
+                     contents ? object_getClassName(contents) : "-", subs);
+            caller("srvpub", "serverview", detail);
+        }
+    }
+
     /* The same adjacent control as the census, so a non-zero here cannot be an index artefact. */
     const uint32_t ntask = observer_u32_arg(server, "taskNamePortOfContextId:", cid + 1u, 0);
     const uint32_t ptask = observer_u32_arg(server, "taskNamePortOfContextId:", cid - 1u, 0);
@@ -2275,7 +2315,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H650");
+    caller("builder", "build", "H651");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

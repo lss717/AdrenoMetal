@@ -2143,12 +2143,12 @@ static void probe_display_frame(const char *why)
                     }
                     if (strcmp(nm, "name") == 0 && tp && tp[0] == '@') {
                         uintptr_t v = 0;
-                        memcpy(&v, (const char *)(void *)d0 + of,
+                        memcpy(&v, (const char *)(__bridge void *)d0 + of,
                                sizeof v);
                         snprintf(ib, sizeof ib,
                                  "ctl name getter=%d ivar=%d match=%d",
                                  nameGet ? 1 : 0, v ? 1 : 0,
-                                 (uintptr_t)(void *)nameGet == v);
+                                 (__bridge uintptr_t)nameGet == v);
                         caller("d0", "h684", ib);
                         continue;
                     }
@@ -2159,7 +2159,7 @@ static void probe_display_frame(const char *why)
                         continue;
                     }
                     uintptr_t v = 0;
-                    memcpy(&v, (const char *)(void *)d0 + of, sizeof v);
+                    memcpy(&v, (const char *)(__bridge void *)d0 + of, sizeof v);
                     if (v != 0 &&
                         (v < 0x100000000ULL || v > 0x8000000000ULL)) {
                         v = 0; /* implausible: report as null only */
@@ -2169,7 +2169,7 @@ static void probe_display_frame(const char *why)
                              nm, (unsigned long)of,
                              (unsigned long long)v,
                              (v && tp[0] == '@')
-                                 ? object_getClassName((id)v) : "-");
+                                 ? object_getClassName((__bridge id)v) : "-");
                     caller("d0", "h684", ib);
                 }
             }

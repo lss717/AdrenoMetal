@@ -876,6 +876,11 @@ static void query_published_desktop_context(const char *why, id server)
         return;
     }
     gPublishedDesktopId = published;
+    /* H668: publish from here, the path H662 proved collectable.  H664 moved the call
+     * into the class inventory, which runs from the bundle constructor before the
+     * accelerator connection exists, so its three passes were spent on output that
+     * could not be delivered and the gate then closed for good. */
+    publish_backboardd_summary("Q");
     const uint32_t cid = (uint32_t) published;
     /* H662: publish once per boot, right after the desktop context id is known, so the text
      * keeps the id= field that this same query has to parse. */
@@ -2442,7 +2447,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H667");
+    caller("builder", "build", "H668");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

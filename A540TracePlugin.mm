@@ -2148,7 +2148,7 @@ static void probe_display_frame(const char *why)
                         snprintf(ib, sizeof ib,
                                  "ctl name getter=%d ivar=%d match=%d",
                                  nameGet ? 1 : 0, v ? 1 : 0,
-                                 (__bridge uintptr_t)nameGet == v);
+                                 (uintptr_t)(__bridge void *)nameGet == v);
                         caller("d0", "h684", ib);
                         continue;
                     }
@@ -2169,7 +2169,7 @@ static void probe_display_frame(const char *why)
                              nm, (unsigned long)of,
                              (unsigned long long)v,
                              (v && tp[0] == '@')
-                                 ? object_getClassName((__bridge id)v) : "-");
+                                 ? object_getClassName((__bridge id)(void *)v) : "-");
                     caller("d0", "h684", ib);
                 }
             }

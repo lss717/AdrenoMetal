@@ -760,9 +760,19 @@ static uint32_t abi_call_rc(uint32_t method, const void *input, size_t inputSize
 /* H660: the desktop context id last read from the published metadata, kept so the
  * backboardd summary can be published without destroying the field the A2 query parses. */
 static uint64_t gPublishedDesktopId;
-static unsigned gHostClassMatched;
 static unsigned gPublishToken;
-static unsigned gHostClassCount;
+/* H669: the two samples reported on one srvpub line.  q* is taken from the Q path where the
+ * connection is proven and the desktop id is known; e* is taken in memory only from the
+ * constructor-time inventory block, which has no usable output channel that early. */
+static int gQInventoryRan;
+static int gQInventoryList;
+static unsigned gQInventoryTotal;
+static unsigned gQInventoryMatched;
+static int gEInventoryRan;
+static int gEInventoryList;
+static unsigned gEInventoryTotal;
+static unsigned gEInventoryMatched;
+
 
 /* H662: publish the backboardd summary with one wrapper, not two.
  *
@@ -775,6 +785,30 @@ static unsigned gHostClassCount;
  * Set and Get run back to back on this same connection and both return codes, the stored call
  * count, the length and the read-back text go on one srvpub line. A read-back showing sb is not
  * by itself a rejection, because SpringBoard writes the same single slot. */
+/* H669: a bounded class-list sample that only returns results.
+ *
+ * H668 proved the Q path can Set and Get, but the published counts read H0/0, which cannot yet
+ * tell "never sampled" from "genuinely zero".  Sampling therefore runs here, once, from the Q path
+ * where the connection is known good and the desktop context id of this boot is already read, and
+ * reports ran/list/total/matched separately so the four states stay distinguishable.  It prints
+ * nothing itself; the existing srvpub round-trip line carries the numbers. */
+static void sample_class_inventory(unsigned *total, unsigned *matched, int *listPresent)
+{
+    unsigned classCount = 0;
+    Class *classList = objc_copyClassList(&classCount);
+    *listPresent = classList ? 1 : 0;
+    unsigned hits = 0;
+    for (unsigned index = 0; classList && index < classCount; ++index) {
+        const char *name = class_getName(classList[index]);
+        if (name && (strstr(name, "Host") || strstr(name, "RenderServer"))) {
+            ++hits;
+        }
+    }
+    free(classList);
+    *total = classCount;
+    *matched = hits;
+}
+
 static void publish_backboardd_summary(const char *stage)
 {
     /* H665: open the tunnel first.  H664 moved this call out of
@@ -797,11 +831,11 @@ static void publish_backboardd_summary(const char *stage)
     const int length = gPublishedDesktopId
         ? snprintf(meta.text, sizeof meta.text, "bb %.1s %.10s/%d H%u/%u id=0x%x t=%u",
                    stage, getprogname() ? getprogname() : "?", getpid(),
-                   gHostClassMatched, gHostClassCount,
+                   gQInventoryMatched, gQInventoryTotal,
                    (unsigned) gPublishedDesktopId, token)
         : snprintf(meta.text, sizeof meta.text, "bb %.1s %.10s/%d H%u/%u t=%u",
                    stage, getprogname() ? getprogname() : "?", getpid(),
-                   gHostClassMatched, gHostClassCount, token);
+                   gQInventoryMatched, gQInventoryTotal, token);
     if (length <= 0 || (size_t) length >= sizeof meta.text) {
         /* H667: this was the only silent path left in the publisher. */
         char abort[160];
@@ -824,10 +858,12 @@ static void publish_backboardd_summary(const char *stage)
                      memcmp(readBack.text, meta.text, (size_t) length) == 0;
     char detail[220];
     snprintf(detail, sizeof detail,
-             "st=%.1s set=0x%x get=0x%x count=%llu setBytes=%u got=%u same=%d want=%.20s got=%.20s",
+             "st=%.1s set=0x%x get=0x%x count=%llu same=%d pid=%d q=%d/%d/%u/%u e=%d/%d/%u/%u want=%.24s",
              stage, (unsigned) setStatus, (unsigned) getStatus,
-             (unsigned long long) readBack.handle, (unsigned) meta.bytes,
-             (unsigned) readBack.bytes, same, meta.text, readBack.text);
+             (unsigned long long) readBack.handle, same, getpid(),
+             gQInventoryRan, gQInventoryList, gQInventoryTotal, gQInventoryMatched,
+             gEInventoryRan, gEInventoryList, gEInventoryTotal, gEInventoryMatched,
+             meta.text);
     caller("srvpub", "roundtrip", detail);
 }
 
@@ -876,10 +912,13 @@ static void query_published_desktop_context(const char *why, id server)
         return;
     }
     gPublishedDesktopId = published;
-    /* H668: publish from here, the path H662 proved collectable.  H664 moved the call
-     * into the class inventory, which runs from the bundle constructor before the
-     * accelerator connection exists, so its three passes were spent on output that
-     * could not be delivered and the gate then closed for good. */
+    /* H669: sample once, here, where the connection is proven and this boot's desktop
+     * context id is already in hand, then publish.  The numbers ride the same srvpub line, so
+     * this adds no new log volume. */
+    if (!gQInventoryRan) {
+        gQInventoryRan = 1;
+        sample_class_inventory(&gQInventoryTotal, &gQInventoryMatched, &gQInventoryList);
+    }
     publish_backboardd_summary("Q");
     const uint32_t cid = (uint32_t) published;
     /* H662: publish once per boot, right after the desktop context id is known, so the text
@@ -2135,38 +2174,16 @@ static void probe_display_frame(const char *why)
              * one priority line, which uses a reserved slot, and repeats it on the first
              * three passes so at least one lands inside the retained window. */
             {
-                static unsigned hostedClassPasses;
-                if (hostedClassPasses < 3) {
-                    ++hostedClassPasses;
-                    unsigned classCount = 0;
-                    Class *classList = objc_copyClassList(&classCount);
-                    unsigned matched = 0;
-                    char names[130] = "";
-                    for (unsigned index = 0; classList && index < classCount; ++index) {
-                        const char *name = class_getName(classList[index]);
-                        if (!name || (!strstr(name, "Host") && !strstr(name, "RenderServer"))) {
-                            continue;
-                        }
-                        ++matched;
-                        if (matched <= 3) {
-                            strncat(names, name, sizeof names - strlen(names) - 2);
-                            strncat(names, " ", sizeof names - strlen(names) - 1);
-                        }
-                    }
-                    free(classList);
-                    char detail[200];
-                    snprintf(detail, sizeof detail, "pass=%u classes=%u matched=%u %s",
-                             hostedClassPasses, classCount, matched, names);
-                    /* H662: keep only the numbers here.  The publish itself moved to
-                     * query_published_desktop_context, which reports on a srvpub line that is
-                     * collected every round, and sets and reads back on one connection. */
-                    gHostClassMatched = matched;
-                    gHostClassCount = classCount;
-                    /* H666: publish unconditionally from the process that just counted.
-                     * H664 gated this on the counts being non-zero, so a NULL class list
-                     * would have left no trace at all, which is exactly the outcome H665
-                     * could not distinguish from the block never running. */
-                    publish_backboardd_summary("E");
+                /* H669: memory only.  This block runs from the bundle constructor,
+                 * before the accelerator connection exists, so anything printed here is
+                 * dropped.  The numbers are read out on the Q path's srvpub line instead,
+                 * and the strncat name building goes with it, which removes the
+                 * underflow risk in its length arithmetic. */
+                if (!gEInventoryRan) {
+                    gEInventoryRan = 1;
+                    sample_class_inventory(&gEInventoryTotal, &gEInventoryMatched,
+                                           &gEInventoryList);
+                }
                 }
             }
             /* H294's setContext: attempt is intentionally retired.  H416 is an
@@ -2447,7 +2464,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H668");
+    caller("builder", "build", "H669");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

@@ -2276,7 +2276,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H648");
+    caller("builder", "build", "H649");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */
@@ -2300,13 +2300,14 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
             caller("builder", "early", detail);
             if (n) {
                 id display = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(list, @selector(objectAtIndex:), 0ULL);
-                static const char *words[] = {
-                    "ontext", "ayer", "urface", "resent", "wap", "oot", "ost",
-                    "ree", "uffer", "rawable", "indow", "ort", "rame", "_"
-                };
                 dump_class("disp", display);
-                dump_methods("disp", object_getClass(display), words,
-                             (unsigned) (sizeof words / sizeof words[0]));
+                /* H649: the full list, not the filtered subset. H647 and H648 both reported
+                 * count disp total=243 matched=33 filter=on, so every reasoning about what the
+                 * display can do was built on 33 of 243 selectors. The desktop context is now
+                 * proven to exist in the server table yet never appears at a display position,
+                 * and deciding what to ask about that needs the real selector list, not a guess
+                 * from a word filter chosen for a different question. */
+                dump_methods("disp", object_getClass(display), NULL, 0);
             }
         } else {
             caller("builder", "early", "srv=nil");

@@ -1573,6 +1573,30 @@ static void record_created_context(id context)
         ++withContents;
     }
 
+    /* H654: cross-check the criterion field.
+
+     * H653 found the request asks for displayId 1 while -[CAContext displayId] reads back 0, and
+     * said the two possible readings cannot be told apart. They can, using properties that are
+     * already on this object. The request dictionary carries secure=1, displayId=1 and
+     * displayable=1, and CAContext exposes -isSecure and -displayId but no displayable accessor.
+     * So if -isSecure reports the requested 1 while -displayId reports 0, the properties do
+     * mirror the request and displayId specifically was not applied. If -isSecure is 0 as well,
+     * then these properties say nothing about the request at all and the criterion field is
+     * wrong, which is the other reading.
+     *
+     * -[CAContext options] is also listed, so the dictionary the context itself holds is read
+     * and described the same way as the one passed in, side by side. */
+    unsigned long long secure = 0, ctxValid = 0;
+    const bool hasSecure = read_integer(context, "isSecure", &secure);
+    read_integer(context, "valid", &ctxValid);
+    id ownOptions = read_object(context, "options");
+    line("event=h654_mirror n=%u idval=0x%llx displayId=0x%llx secure=%d secureVal=%llu valid=%llu ownOptions=%d",
+         created, contextId, displayId, hasSecure ? 1 : 0, secure, ctxValid,
+         ownOptions ? 1 : 0);
+    if (ownOptions) {
+        describe_context_options("context", ownOptions);
+    }
+
     line("event=h652_ctx n=%u id=%d idval=0x%llx display=%d displayId=0x%llx layer=%s contents=%s subs=%llu d1=%u lc=%u ct=%u",
          created, hasId ? 1 : 0, contextId, hasDisplay ? 1 : 0, displayId,
          class_name_or_nil(layer), class_name_or_nil(contents), subs,
@@ -1594,7 +1618,7 @@ static void record_created_context(id context)
  * the values are the ones the caller passed rather than anything the implementation may have
  * changed. Values are described only when they are strings or numbers, so no unknown -description
  * implementation is invoked, and the entry count is capped. */
-static void describe_context_options(id options)
+static void describe_context_options(const char *source, id options)
 {
     static unsigned calls;
     if (calls >= 8) {
@@ -1602,14 +1626,14 @@ static void describe_context_options(id options)
     }
     ++calls;
     if (!options) {
-        line_reserved("event=h653_options idx=%u nil=1", calls - 1);
+        line_reserved("event=h653_options src=%.8s idx=%u nil=1", source, calls - 1);
         return;
     }
     const SEL respondsSel = sel_getUid("respondsToSelector:");
     BOOL (*responds)(id, SEL, SEL) = (BOOL (*)(id, SEL, SEL)) objc_msgSend;
     if (!responds(options, respondsSel, sel_getUid("count"))) {
-        line_reserved("event=h653_options idx=%u cls=%.24s no-count=1", calls - 1,
-                      object_getClassName(options));
+        line_reserved("event=h653_options src=%.8s idx=%u cls=%.24s no-count=1", source,
+                      calls - 1, object_getClassName(options));
         return;
     }
     const unsigned long long n = ((unsigned long long (*)(id, SEL)) objc_msgSend)(
@@ -1620,8 +1644,8 @@ static void describe_context_options(id options)
             keys = ((id (*)(id, SEL)) objc_msgSend)(options, sel_getUid("allKeys"));
         } @catch (id ignored) { keys = nil; }
     }
-    line_reserved("event=h653_options idx=%u cls=%.24s entries=%llu keys=%d", calls - 1,
-                  object_getClassName(options), n, keys ? 1 : 0);
+    line_reserved("event=h653_options src=%.8s idx=%u cls=%.24s entries=%llu keys=%d", source,
+                  calls - 1, object_getClassName(options), n, keys ? 1 : 0);
     if (!keys) {
         return;
     }
@@ -1661,14 +1685,14 @@ static void describe_context_options(id options)
         } else if (value) {
             snprintf(valueText, sizeof valueText, "not-described");
         }
-        line_reserved("event=h653_entry idx=%u i=%llu kcls=%.16s key=%.40s vcls=%.20s val=%.40s",
-                      calls - 1, i, keyClass, keyText, valueClass, valueText);
+        line_reserved("event=h653_entry src=%.8s idx=%u i=%llu key=%.40s vcls=%.20s val=%.40s",
+                      source, calls - 1, i, keyText, valueClass, valueText);
     }
 }
 
 static id trace_context_remote_with_options(id self, SEL selector, id options)
 {
-    describe_context_options(options);
+    describe_context_options("request", options);
     id context = ((id (*)(id, SEL, id)) gContextRemoteWithOptions)(
         self, selector, options);
     unsigned long long contextId = 0;
@@ -2599,7 +2623,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H653", process, getpid());
+    line("observer load process=%s pid=%d build=H654", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

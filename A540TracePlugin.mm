@@ -69,6 +69,7 @@ extern "C" kern_return_t bootstrap_look_up(mach_port_t bootstrapPort, const char
 
 static const uint32_t kTunnelMagic = 0x4e544e4c;   /* 'NTNL' */
 static const uint32_t kMethodLog = 17;
+static const uint32_t kMethodSetMetadata = 9;
 static const uint32_t kMaxLog = 184;
 
 static io_connect_t gConnection;
@@ -149,18 +150,6 @@ static void emit_priority(const char *text)
         return;
     }
     if (gConnection) emit_raw(text);
-}
-
-/* H660: one-line summary of the Host/RenderServer classes seen in this process, filled by
- * probe_display_frame and reported on the observe-only line, which arrives every pass. */
-static char gHostClassSummary[200];
-
-static const char *hostClassSummary(const char *why)
-{
-    static char joined[240];
-    snprintf(joined, sizeof joined, "%s %s", why,
-             gHostClassSummary[0] ? gHostClassSummary : "hosts=pending");
-    return joined;
 }
 
 static void caller(const char *cls, const char *sel, const char *detail)
@@ -766,6 +755,10 @@ static uint32_t abi_call_rc(uint32_t method, const void *input, size_t inputSize
  *
  * The stored handle is the SetMetadata call count, so a reader can tell whether the desktop
  * process published anything at all in this boot. */
+/* H660: the desktop context id last read from the published metadata, kept so the
+ * backboardd summary can be published without destroying the field the A2 query parses. */
+static uint64_t gPublishedDesktopId;
+
 static void query_published_desktop_context(const char *why, id server)
 {
     static unsigned calls;
@@ -809,6 +802,7 @@ static void query_published_desktop_context(const char *why, id server)
         caller("srvpub", "parse", detail);
         return;
     }
+    gPublishedDesktopId = published;
     const uint32_t cid = (uint32_t) published;
 
     const uint32_t client = observer_u32_arg(server, "clientPortOfContextId:", cid, 0);
@@ -2083,11 +2077,32 @@ static void probe_display_frame(const char *why)
                     char detail[200];
                     snprintf(detail, sizeof detail, "pass=%u classes=%u matched=%u %s",
                              hostedClassPasses, classCount, matched, names);
-                                        /* H660: carry the answer on a line that is known to arrive.  H658 sent a
-                     * burst and H659 sent one priority line, and neither appeared even though
-                     * emit_priority has no budget, so the summary rides on the observe-only
-                     * line instead of standing on its own. */
-                    snprintf(gHostClassSummary, sizeof gHostClassSummary, "%s", detail);
+                    /* H660: publish the answer through SetMetadata instead of a log line.
+                     * The kernel keeps this slot and prints it on every heartbeat, which is
+                     * the one path that arrived in every round, while the plugin log lines
+                     * were lost in H658 and H659.  Published once, short enough for 64 bytes. */
+                    struct {
+                        uint32_t magic, method;
+                        uint64_t handle;
+                        uint32_t bytes, reserved;
+                        char text[64];
+                    } meta;
+                    memset(&meta, 0, sizeof meta);
+                    const int metaLength = snprintf(meta.text, sizeof meta.text,
+                                                    gPublishedDesktopId ? "bb H%u/%u id=0x%llx" : "bb H%u/%u",
+                                                    matched, classCount,
+                                                    (unsigned long long) gPublishedDesktopId);
+                    if (metaLength > 0 && (size_t) metaLength < sizeof meta.text) {
+                        meta.magic = kTunnelMagic;
+                        meta.method = kMethodSetMetadata;
+                        meta.bytes = (uint32_t) metaLength;
+                        const uint32_t metaStatus = abi_call_rc(
+                            meta.method, &meta, sizeof meta, NULL, 0);
+                        snprintf(detail, sizeof detail,
+                                 "pass=%u classes=%u matched=%u st=0x%x",
+                                 hostedClassPasses, classCount, matched, metaStatus);
+                        caller_priority("host", "publish", detail);
+                    }
                 }
             }
             /* H294's setContext: attempt is intentionally retired.  H416 is an
@@ -2116,7 +2131,7 @@ static void probe_display_frame(const char *why)
             }
             caller("srv", "bind", "skipped-observer-only");
         }
-        caller("disp", "observe-only", hostClassSummary(why));
+        caller("disp", "observe-only", why);
         return;
 
 #if 0

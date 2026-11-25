@@ -2004,7 +2004,7 @@ static void *h680_handle(id context)
     if (context == nil) {
         return NULL;
     }
-    return *(void *volatile *)((volatile char *)(void *)context + 0xd0);
+    return *(void *volatile *)((volatile char *)(__bridge void *)context + 0xd0);
 }
 
 static mach_port_t h680_server_port(id context)

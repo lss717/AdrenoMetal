@@ -919,6 +919,10 @@ static unsigned gTxFlushCount;
 static unsigned gTxCommitCount;
 static int gTxControlHit;
 
+/* control block shared with the H674 asm stubs (layout documented at the
+ * install_h674_got_rebinding definition below) */
+extern "C" uint64_t gH674Ctl[12] __attribute__((aligned(64)));
+
 /* H672: observe the transaction commit entry and the real send boundary from
  * inside SpringBoard WITHOUT touching any page. The 21H461 audit (STATUS 379/
  * 381/383) fixed the map: the CFRunLoop observer QuartzCore registers is the
@@ -1040,7 +1044,6 @@ static uint64_t gH674Reported;
  * 24 mach_msg2_trap entries, 32 mach_msg2 render-port sends,
  * 40 mach_msg2_trap render-port sends, 48 real mach_msg2,
  * 56 real mach_msg2_trap, 64 render port mirror */
-extern "C" uint64_t gH674Ctl[12] __attribute__((aligned(64)));
 extern "C" void h674_msg2_stub(void);
 extern "C" void h674_msg2trap_stub(void);
 

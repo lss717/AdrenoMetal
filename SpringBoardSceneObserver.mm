@@ -13,6 +13,7 @@
 #include <mach/mach.h>
 #include <mach/arm/thread_status.h>
 #include <mach/thread_act.h>
+#include <servers/bootstrap.h>
 #include <sys/proc.h>
 #include <cxxabi.h>
 #include <dlfcn.h>
@@ -915,6 +916,151 @@ static unsigned gTxFlushCount;
 static unsigned gTxCommitCount;
 static int gTxControlHit;
 
+/* H672: observe the transaction commit entry and the real send boundary from
+ * inside SpringBoard WITHOUT touching any page. The 21H461 audit (STATUS 379/
+ * 381/383) fixed the map: the CFRunLoop observer QuartzCore registers is the
+ * C function CA::Transaction::observer_callback (static vm 0x189452974); it
+ * tail-branches flush_as_runloop_observer, which calls CA::Transaction::
+ * commit() (and flush(), whose body tail-branches commit()). Every run-loop
+ * driven commit therefore crosses observer_callback, which no ObjC hook can
+ * see - that is exactly the blind spot that left H670 at tx=1/0. The payload
+ * leaves the process as mach messages sent to the CARenderServer connection
+ * port obtained through bootstrap_look_up. All three points sit on exported
+ * C functions, so DYLD interposition covers them with no inline patching;
+ * H671 proved the page-protect route kills SpringBoard (STATUS 383). */
+static volatile uint64_t gH672ObserverFires;
+static volatile uint64_t gH672MachSends;
+static volatile uint64_t gH672MachTotal;
+static volatile uint64_t gH672Flags; /* 1 observer captured, 2 mach live, 4 render port */
+static uintptr_t gH672CaObserverCallback;
+static CFRunLoopObserverCallBack gH672RealObserverCallback;
+static mach_port_t gH672RenderPort = MACH_PORT_NULL;
+
+static void h672_ca_observer_wrapper(CFRunLoopObserverRef observer,
+                                     CFOptionFlags activity, void *info)
+{
+    ++gH672ObserverFires;
+    if (gH672RealObserverCallback) gH672RealObserverCallback(observer, activity, info);
+}
+
+static void h672_install_ca_observer_anchor(void)
+{
+    const uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; ++i) {
+        const char *name = _dyld_get_image_name(i);
+        if (name && strncmp(name, "/System/", 8) == 0 &&
+            strstr(name, "/QuartzCore.framework/QuartzCore")) {
+            gH672CaObserverCallback =
+                (uintptr_t)0x189452974ULL + (uintptr_t)_dyld_get_image_vmaddr_slide(i);
+            return;
+        }
+    }
+}
+
+static CFRunLoopObserverRef h672_obs_create(CFAllocatorRef allocator,
+    CFOptionFlags activities, Boolean repeats, CFIndex order,
+    CFRunLoopObserverCallBack callback, CFRunLoopObserverContext *context)
+{
+    if (callback && gH672CaObserverCallback &&
+        (uintptr_t)callback == gH672CaObserverCallback) {
+        gH672RealObserverCallback = callback;
+        gH672Flags |= 1;
+        callback = h672_ca_observer_wrapper;
+    }
+    return CFRunLoopObserverCreate(allocator, activities, repeats, order, callback, context);
+}
+
+static CFRunLoopObserverRef h672_obs_create_with_attributes(
+    CFAllocatorRef allocator, CFOptionFlags activities, Boolean repeats, CFIndex order,
+    CFRunLoopObserverCallBack callback, CFArrayRef signalers,
+    CFRunLoopObserverContext *context)
+{
+    if (callback && gH672CaObserverCallback &&
+        (uintptr_t)callback == gH672CaObserverCallback) {
+        gH672RealObserverCallback = callback;
+        gH672Flags |= 1;
+        callback = h672_ca_observer_wrapper;
+    }
+    return CFRunLoopObserverCreateWithAttributes(allocator, activities, repeats, order,
+                                                 callback, signalers, context);
+}
+
+static kern_return_t h672_bootstrap_look_up(mach_port_t bp, const char *service_name,
+                                            mach_port_t *sp)
+{
+    const kern_return_t kr = bootstrap_look_up(bp, service_name, sp);
+    if (kr == KERN_SUCCESS && service_name && sp &&
+        strstr(service_name, "CARenderServer") != NULL) {
+        gH672RenderPort = *sp;
+        gH672Flags |= 4;
+    }
+    return kr;
+}
+
+static inline void h672_count_send(const mach_msg_header_t *msg, mach_msg_option_t option)
+{
+    ++gH672MachTotal;
+    gH672Flags |= 2;
+    if (gH672RenderPort != MACH_PORT_NULL && (option & MACH_SEND_MSG) &&
+        msg && msg->msgh_remote_port == gH672RenderPort) {
+        ++gH672MachSends;
+    }
+}
+
+static kern_return_t h672_mach_msg(mach_msg_header_t *msg, mach_msg_option_t option,
+    mach_msg_size_t send_size, mach_msg_size_t receive_size, mach_msg_timeout_t timeout,
+    mach_port_t notify, mach_port_t receive_port, mach_port_t send_port)
+{
+    h672_count_send(msg, option);
+    return mach_msg(msg, option, send_size, receive_size, timeout, notify,
+                    receive_port, send_port);
+}
+
+static kern_return_t h672_mach_msg_overwrite(mach_msg_header_t *msg,
+    mach_msg_option_t option, mach_msg_size_t send_size, mach_msg_size_t receive_size,
+    mach_msg_size_t rcv_right, mach_msg_header_t *rcv_msg, mach_port_t rcv_name,
+    mach_msg_timeout_t timeout, mach_port_t notify)
+{
+    h672_count_send(msg, option);
+    return mach_msg_overwrite(msg, option, send_size, receive_size, rcv_right,
+                              rcv_msg, rcv_name, timeout, notify);
+}
+
+static kern_return_t h672_mach_msg2(mach_msg_header_t *msg, uint32_t option,
+                                    uint64_t *kmsg, mach_msg2_trailer_t *trailer)
+{
+    h672_count_send(msg, (mach_msg_option_t)option);
+    return mach_msg2(msg, option, kmsg, trailer);
+}
+
+__attribute__((used, section("__DATA,__interpose")))
+static const DyldInterpose gH672Interpose[] = {
+    {
+        (const void *) h672_obs_create,
+        (const void *) CFRunLoopObserverCreate,
+    },
+    {
+        (const void *) h672_obs_create_with_attributes,
+        (const void *) CFRunLoopObserverCreateWithAttributes,
+    },
+    {
+        (const void *) h672_bootstrap_look_up,
+        (const void *) bootstrap_look_up,
+    },
+    {
+        (const void *) h672_mach_msg,
+        (const void *) mach_msg,
+    },
+    {
+        (const void *) h672_mach_msg_overwrite,
+        (const void *) mach_msg_overwrite,
+    },
+    {
+        (const void *) h672_mach_msg2,
+        (const void *) mach_msg2,
+    },
+};
+
 static void publish_desktop_context_summary(unsigned created, unsigned onDisplay, unsigned withLayer,
                                             unsigned withContents, uint64_t lastId)
 {
@@ -931,9 +1077,12 @@ static void publish_desktop_context_summary(unsigned created, unsigned onDisplay
     } meta;
     memset(&meta, 0, sizeof meta);
     const int length = snprintf(meta.text, sizeof meta.text,
-                                "sb n=%u d1=%u lc=%u ct=%u id=0x%llx tx=%u/%u c=%d",
-                                created, onDisplay, withLayer, withContents, lastId,
-                                gTxFlushCount, gTxCommitCount, gTxControlHit);
+                                "sb n=%u d1=%u id=0x%llx tx=%u/%u c=%d of=%u mm=%u ok=%u",
+                                created, onDisplay, lastId,
+                                gTxFlushCount, gTxCommitCount, gTxControlHit,
+                                (unsigned)(gH672ObserverFires > 99999ULL ? 99999ULL : gH672ObserverFires),
+                                (unsigned)(gH672MachSends > 99999ULL ? 99999ULL : gH672MachSends),
+                                (unsigned)gH672Flags);
     if (length <= 0 || (size_t) length >= sizeof meta.text) {
         line_reserved("event=h652_publish n=%u result=format", created);
         return;
@@ -953,9 +1102,11 @@ static void publish_desktop_context_summary(unsigned created, unsigned onDisplay
     memcpy(request.text, meta.text, sizeof meta.text);
     const kern_return_t status = IOConnectCallStructMethod(
         gConnection, gSelector, &request, sizeof request, NULL, NULL);
-    line_reserved("event=h652_publish n=%u d1=%u lc=%u ct=%u id=0x%llx bytes=%u st=0x%x",
+    line_reserved("event=h652_publish n=%u d1=%u lc=%u ct=%u id=0x%llx bytes=%u st=0x%x h672 of=%llu mm=%llu mt=%llu ok=%llu",
                   created, onDisplay, withLayer, withContents, lastId,
-                  (unsigned) length, (unsigned) status);
+                  (unsigned) length, (unsigned) status,
+                  (unsigned long long)gH672ObserverFires, (unsigned long long)gH672MachSends,
+                  (unsigned long long)gH672MachTotal, (unsigned long long)gH672Flags);
 }
 
 static void emit_internal(const char *text, bool reserved)
@@ -2771,10 +2922,11 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
            RTLD_NOW);
     dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     install_ca_event_hooks();
+    h672_install_ca_observer_anchor();
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H670", process, getpid());
+    line("observer load process=%s pid=%d build=H672", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

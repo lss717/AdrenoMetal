@@ -519,10 +519,10 @@ static const uint64_t kH655PointerMask = 0x0000FFFFFFFFFFFFull;
 
 static bool h655_read_word(uint64_t address, uint64_t *word)
 {
-    mach_vm_size_t moved = 0;
+    vm_size_t moved = 0;
     const kern_return_t status = vm_read_overwrite(
-        mach_task_self(), (mach_vm_address_t)address, sizeof(uint64_t),
-        (mach_vm_address_t)word, &moved);
+        mach_task_self(), (vm_address_t)address, sizeof(uint64_t),
+        (vm_address_t)word, &moved);
     return status == KERN_SUCCESS && moved == sizeof(uint64_t);
 }
 

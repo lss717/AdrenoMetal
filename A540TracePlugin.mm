@@ -2130,7 +2130,7 @@ static void probe_display_frame(const char *why)
                 id nameGet = observer_object(d0, "name");
                 char ib[200];
                 snprintf(ib, sizeof ib,
-                         "ivars H684 count=%u cls=%.40s name=0x%llx", ic,
+                         "ivars H684b count=%u cls=%.40s name=0x%llx", ic,
                          object_getClassName(d0),
                          (unsigned long long)(__bridge void *)nameGet);
                 caller("d0", "h684", ib);

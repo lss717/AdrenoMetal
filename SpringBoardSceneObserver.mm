@@ -789,15 +789,25 @@ static bool connect_accelerator(void)
  * every log line, and SetMetadata is already implemented there and already stores its text in the
  * kernel. This only uses that existing path, once, and reports the kern_return so a failure is a
  * stated fact rather than a silent absence. */
-static void publish_desktop_context_id(uint64_t contextId)
+/* H652: report every context this process creates, not just the first.
+
+ * H651 showed SpringBoard created three remote contexts at 515.4, 654.0 and 663.0s while
+ * publish_desktop_context_id fired once, so what was proven is only that some SpringBoard context
+ * sits in the server port table, not that it is the desktop one. The fields that matter for the
+ * first frame - which display the context points at, whether it has a layer, whether that layer
+ * carries contents - are plain properties of the context object and are readable right here, in
+ * the process that created it. +[CAContext contextWithId:] returns nil in backboardd for a foreign
+ * id, so the server side object is not reachable; the client side one is.
+ *
+ * Each context therefore gets its own line with the full fields, and the 64 byte SetMetadata slot
+ * gets a cumulative summary so the render server side query keeps working without silently
+ * reporting only the oldest context. */
+static void publish_desktop_context_summary(unsigned created, unsigned onDisplay, unsigned withLayer,
+                                            unsigned withContents, uint64_t lastId)
 {
-    static bool published;
-    if (published) {
-        return;
-    }
-    published = true;
     if (!connect_accelerator()) {
-        line_reserved("event=h648_publish id=0x%llx result=no-accelerator", contextId);
+        line_reserved("event=h652_publish n=%u d1=%u lc=%u ct=%u id=0x%llx result=no-accelerator",
+                      created, onDisplay, withLayer, withContents, lastId);
         return;
     }
     struct {
@@ -807,9 +817,11 @@ static void publish_desktop_context_id(uint64_t contextId)
         char text[64];
     } meta;
     memset(&meta, 0, sizeof meta);
-    const int length = snprintf(meta.text, sizeof meta.text, "sbctx=0x%llx", contextId);
+    const int length = snprintf(meta.text, sizeof meta.text,
+                                "sb n=%u d1=%u lc=%u ct=%u id=0x%llx",
+                                created, onDisplay, withLayer, withContents, lastId);
     if (length <= 0 || (size_t) length >= sizeof meta.text) {
-        line_reserved("event=h648_publish id=0x%llx result=format", contextId);
+        line_reserved("event=h652_publish n=%u result=format", created);
         return;
     }
     meta.bytes = (uint32_t) length;
@@ -827,8 +839,9 @@ static void publish_desktop_context_id(uint64_t contextId)
     memcpy(request.text, meta.text, sizeof meta.text);
     const kern_return_t status = IOConnectCallStructMethod(
         gConnection, gSelector, &request, sizeof request, NULL, NULL);
-    line_reserved("event=h648_publish id=0x%llx bytes=%u st=0x%x",
-                  contextId, (unsigned) length, (unsigned) status);
+    line_reserved("event=h652_publish n=%u d1=%u lc=%u ct=%u id=0x%llx bytes=%u st=0x%x",
+                  created, onDisplay, withLayer, withContents, lastId,
+                  (unsigned) length, (unsigned) status);
 }
 
 static void emit_internal(const char *text, bool reserved)
@@ -1531,6 +1544,45 @@ static void trace_context_set_layer(id self, SEL selector, id layer)
     }
 }
 
+/* H652: read the fields that decide the first frame, from the process that owns them.
+
+ * displayId says which display this context points at, layer says whether anything is mounted on
+ * it, and the layer contents and sublayer count say whether the desktop has actually put pixels
+ * into it. All four are ordinary properties here, and none of them is reachable in backboardd,
+ * where +[CAContext contextWithId:] returns nil for a foreign id. */
+static void record_created_context(id context)
+{
+    static unsigned created, onDisplay, withLayer, withContents;
+    unsigned long long contextId = 0;
+    const bool hasId = read_integer(context, "contextId", &contextId);
+    unsigned long long displayId = 0;
+    const bool hasDisplay = read_integer(context, "displayId", &displayId);
+    id layer = read_object(context, "layer");
+    id contents = read_object(layer, "contents");
+    unsigned long long subs = 0;
+    read_integer(read_object(layer, "sublayers"), "count", &subs);
+
+    ++created;
+    if (hasDisplay && displayId == 1u) {
+        ++onDisplay;
+    }
+    if (layer) {
+        ++withLayer;
+    }
+    if (contents) {
+        ++withContents;
+    }
+
+    line("event=h652_ctx n=%u id=%d idval=0x%llx display=%d displayId=0x%llx layer=%s contents=%s subs=%llu d1=%u lc=%u ct=%u",
+         created, hasId ? 1 : 0, contextId, hasDisplay ? 1 : 0, displayId,
+         class_name_or_nil(layer), class_name_or_nil(contents), subs,
+         onDisplay, withLayer, withContents);
+
+    if (hasId) {
+        publish_desktop_context_summary(created, onDisplay, withLayer, withContents, contextId);
+    }
+}
+
 static id trace_context_remote_with_options(id self, SEL selector, id options)
 {
     id context = ((id (*)(id, SEL, id)) gContextRemoteWithOptions)(
@@ -1539,9 +1591,7 @@ static id trace_context_remote_with_options(id self, SEL selector, id options)
     const bool hasContextId = read_integer(context, "contextId", &contextId);
     id layer = read_object(context, "layer");
     census_once("remote-create");
-    if (hasContextId) {
-        publish_desktop_context_id(contextId);
-    }
+    record_created_context(context);
     line("event=ca_context_remote_create pid=%d context=%p contextId=0x%x hasContextId=%d layer=%.24s options=%.24s",
          getpid(), (__bridge void *) context, (unsigned) contextId,
          hasContextId ? 1 : 0, class_name_or_nil(layer),
@@ -2465,7 +2515,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H648", process, getpid());
+    line("observer load process=%s pid=%d build=H652", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

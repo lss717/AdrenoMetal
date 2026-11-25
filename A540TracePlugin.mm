@@ -786,8 +786,13 @@ static void query_published_desktop_context(const char *why, id server)
         return;
     }
 
+    /* H652: the published text is a cumulative summary now, "sb n=.. d1=.. lc=.. ct=.. id=0x..",
+     * because SpringBoard creates several contexts and publishing only the first one could not say
+     * which of them mattered. This is a pipeline dependency of that change, not a second variable:
+     * without it the reader would silently fail to parse every round. */
     unsigned long long published = 0;
-    if (sscanf(meta.text, "sbctx=0x%llx", &published) != 1) {
+    const char *idField = strstr(meta.text, "id=0x");
+    if (!idField || sscanf(idField, "id=0x%llx", &published) != 1 || published == 0) {
         snprintf(detail, sizeof detail, "%s parse-failed text=%.40s", why, meta.text);
         caller("srvpub", "parse", detail);
         return;

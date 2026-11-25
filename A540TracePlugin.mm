@@ -69,7 +69,6 @@ extern "C" kern_return_t bootstrap_look_up(mach_port_t bootstrapPort, const char
 
 static const uint32_t kTunnelMagic = 0x4e544e4c;   /* 'NTNL' */
 static const uint32_t kMethodLog = 17;
-static const uint32_t kMethodSetMetadata = 9;
 static const uint32_t kMaxLog = 184;
 
 static io_connect_t gConnection;
@@ -755,6 +754,49 @@ static uint32_t abi_call_rc(uint32_t method, const void *input, size_t inputSize
  *
  * The stored handle is the SetMetadata call count, so a reader can tell whether the desktop
  * process published anything at all in this boot. */
+/* H662: the class inventory collected in probe_display_frame.  That function reports on plugin
+ * log lines, which have not been collectable in H658 through H661, so the numbers are kept here
+ * and published from a connection whose reporting line does arrive. */
+static unsigned gHostClassMatched;
+static unsigned gHostClassCount;
+
+/* H662: publish the backboardd summary with one wrapper, not two.
+ *
+ * H660 and H661 built a struct that already carried magic and method and then passed it to
+ * abi_call_rc, which adds that header itself. The kernel reads the metadata at input + 2, so it
+ * landed on the inner header: the inner magic and method became the handle, and the zero handle
+ * became bytes = 0, so every publish stored an empty string. H661 left three empty
+ * "NATIVE_A540_ABI: report" lines before SpringBoard republished, which is the trace of that.
+ *
+ * Set and Get run back to back on this same connection and both return codes, the stored call
+ * count, the length and the read-back text go on one srvpub line. A read-back showing sb is not
+ * by itself a rejection, because SpringBoard writes the same single slot. */
+static void publish_backboardd_summary(uint32_t contextId)
+{
+    NativeAdrenoAbiMetadata meta;
+    memset(&meta, 0, sizeof meta);
+    const int length = snprintf(meta.text, sizeof meta.text, "bb H%u/%u id=0x%x",
+                                gHostClassMatched, gHostClassCount, contextId);
+    if (length <= 0 || (size_t) length >= sizeof meta.text) {
+        return;
+    }
+    meta.bytes = (uint32_t) length;
+    const uint32_t setStatus = abi_call_rc(NativeAdrenoMethodSetMetadata, &meta, sizeof meta,
+                                           NULL, 0);
+
+    NativeAdrenoAbiMetadata readBack;
+    memset(&readBack, 0, sizeof readBack);
+    const uint32_t getStatus = abi_call_rc(NativeAdrenoMethodGetMetadata, NULL, 0,
+                                           &readBack, sizeof readBack);
+    readBack.text[sizeof readBack.text - 1] = 0;
+    char detail[220];
+    snprintf(detail, sizeof detail,
+             "roundtrip set=0x%x get=0x%x setBytes=%u count=%llu got=%u text=%.44s",
+             (unsigned) setStatus, (unsigned) getStatus, (unsigned) meta.bytes,
+             (unsigned long long) readBack.handle, (unsigned) readBack.bytes, readBack.text);
+    caller("srvpub", "roundtrip", detail);
+}
+
 /* H660: the desktop context id last read from the published metadata, kept so the
  * backboardd summary can be published without destroying the field the A2 query parses. */
 static uint64_t gPublishedDesktopId;
@@ -804,6 +846,13 @@ static void query_published_desktop_context(const char *why, id server)
     }
     gPublishedDesktopId = published;
     const uint32_t cid = (uint32_t) published;
+    /* H662: publish once per boot, right after the desktop context id is known, so the text
+     * keeps the id= field that this same query has to parse. */
+    static bool summaryPublished;
+    if (!summaryPublished) {
+        summaryPublished = true;
+        publish_backboardd_summary(cid);
+    }
 
     const uint32_t client = observer_u32_arg(server, "clientPortOfContextId:", cid, 0);
     const uint32_t task = observer_u32_arg(server, "taskNamePortOfContextId:", cid, 0);
@@ -1876,37 +1925,6 @@ static void __attribute__((unused)) probe_scenes(const char *why)
 
 static void probe_display_frame(const char *why)
 {
-    /* H661: publish from the function entry, before any branch here can leave early.
-     *
-     * H660 showed the metadata slot itself works, because the kernel printed rep=sb eight
-     * times, while the backboardd publish never took effect. So the open question is now
-     * simply whether this code runs at all. E means the entry ran, H means the later path
-     * ran too. Only the first two passes publish, so SpringBoard gets the slot back.
-     * Otherwise this would keep stealing the field the A2 query parses. */
-    {
-        static unsigned entryPasses;
-        ++entryPasses;
-        if (entryPasses <= 2) {
-            struct {
-                uint32_t magic, method;
-                uint64_t handle;
-                uint32_t bytes, reserved;
-                char text[64];
-            } meta;
-            memset(&meta, 0, sizeof meta);
-            const int length = gPublishedDesktopId
-                ? snprintf(meta.text, sizeof meta.text, "bb E%u id=0x%llx",
-                           entryPasses, (unsigned long long) gPublishedDesktopId)
-                : snprintf(meta.text, sizeof meta.text, "bb E%u", entryPasses);
-            if (length > 0 && (size_t) length < sizeof meta.text) {
-                meta.magic = kTunnelMagic;
-                meta.method = kMethodSetMetadata;
-                meta.bytes = (uint32_t) length;
-                (void) abi_call_rc(meta.method, &meta, sizeof meta, NULL, 0);
-            }
-        }
-    }
-
     /* H272f: the display walk must run before the boot dies (209 s in the last two
      * runs), but the Metal device is only initialised at 213-289 s.  So it is also
      * driven from the bundle constructor, and once a layer is attached it stops. */
@@ -2108,32 +2126,11 @@ static void probe_display_frame(const char *why)
                     char detail[200];
                     snprintf(detail, sizeof detail, "pass=%u classes=%u matched=%u %s",
                              hostedClassPasses, classCount, matched, names);
-                    /* H660: publish the answer through SetMetadata instead of a log line.
-                     * The kernel keeps this slot and prints it on every heartbeat, which is
-                     * the one path that arrived in every round, while the plugin log lines
-                     * were lost in H658 and H659.  Published once, short enough for 64 bytes. */
-                    struct {
-                        uint32_t magic, method;
-                        uint64_t handle;
-                        uint32_t bytes, reserved;
-                        char text[64];
-                    } meta;
-                    memset(&meta, 0, sizeof meta);
-                    const int metaLength = snprintf(meta.text, sizeof meta.text,
-                                                    gPublishedDesktopId ? "bb H%u/%u id=0x%llx" : "bb H%u/%u",
-                                                    matched, classCount,
-                                                    (unsigned long long) gPublishedDesktopId);
-                    if (metaLength > 0 && (size_t) metaLength < sizeof meta.text) {
-                        meta.magic = kTunnelMagic;
-                        meta.method = kMethodSetMetadata;
-                        meta.bytes = (uint32_t) metaLength;
-                        const uint32_t metaStatus = abi_call_rc(
-                            meta.method, &meta, sizeof meta, NULL, 0);
-                        snprintf(detail, sizeof detail,
-                                 "pass=%u classes=%u matched=%u st=0x%x",
-                                 hostedClassPasses, classCount, matched, metaStatus);
-                        caller_priority("host", "publish", detail);
-                    }
+                    /* H662: keep only the numbers here.  The publish itself moved to
+                     * query_published_desktop_context, which reports on a srvpub line that is
+                     * collected every round, and sets and reads back on one connection. */
+                    gHostClassMatched = matched;
+                    gHostClassCount = classCount;
                 }
             }
             /* H294's setContext: attempt is intentionally retired.  H416 is an
@@ -2414,7 +2411,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H661");
+    caller("builder", "build", "H662");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

@@ -858,7 +858,7 @@ static void publish_backboardd_summary(const char *stage)
                      memcmp(readBack.text, meta.text, (size_t) length) == 0;
     char detail[220];
     snprintf(detail, sizeof detail,
-             "st=%.1s set=0x%x get=0x%x count=%llu same=%d pid=%d q=%d/%d/%u/%u e=%d/%d/%u/%u want=%.24s",
+             "st=%.1s set=0x%x get=0x%x count=%llu setBytes=%u got=%u same=%d pid=%d q=%d/%d/%u/%u e=%d/%d/%u/%u want=%.24s",
              stage, (unsigned) setStatus, (unsigned) getStatus,
              (unsigned long long) readBack.handle, (unsigned) meta.bytes,
              (unsigned) readBack.bytes, same, getpid(),

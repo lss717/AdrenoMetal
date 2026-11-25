@@ -1876,6 +1876,37 @@ static void __attribute__((unused)) probe_scenes(const char *why)
 
 static void probe_display_frame(const char *why)
 {
+    /* H661: publish from the function entry, before any branch here can leave early.
+     *
+     * H660 showed the metadata slot itself works, because the kernel printed rep=sb eight
+     * times, while the backboardd publish never took effect. So the open question is now
+     * simply whether this code runs at all. E means the entry ran, H means the later path
+     * ran too. Only the first two passes publish, so SpringBoard gets the slot back.
+     * Otherwise this would keep stealing the field the A2 query parses. */
+    {
+        static unsigned entryPasses;
+        ++entryPasses;
+        if (entryPasses <= 2) {
+            struct {
+                uint32_t magic, method;
+                uint64_t handle;
+                uint32_t bytes, reserved;
+                char text[64];
+            } meta;
+            memset(&meta, 0, sizeof meta);
+            const int length = gPublishedDesktopId
+                ? snprintf(meta.text, sizeof meta.text, "bb E%u id=0x%llx",
+                           entryPasses, (unsigned long long) gPublishedDesktopId)
+                : snprintf(meta.text, sizeof meta.text, "bb E%u", entryPasses);
+            if (length > 0 && (size_t) length < sizeof meta.text) {
+                meta.magic = kTunnelMagic;
+                meta.method = kMethodSetMetadata;
+                meta.bytes = (uint32_t) length;
+                (void) abi_call_rc(meta.method, &meta, sizeof meta, NULL, 0);
+            }
+        }
+    }
+
     /* H272f: the display walk must run before the boot dies (209 s in the last two
      * runs), but the Metal device is only initialised at 213-289 s.  So it is also
      * driven from the bundle constructor, and once a layer is attached it stops. */
@@ -2383,7 +2414,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H660");
+    caller("builder", "build", "H661");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

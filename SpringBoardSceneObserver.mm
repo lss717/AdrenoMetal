@@ -13,6 +13,7 @@
 #include <mach/mach.h>
 #include <mach/arm/thread_status.h>
 #include <mach/thread_act.h>
+#include <mach-o/dyld.h>
 // servers/bootstrap.h is not in the public SDK; the prototype is stable.
 extern "C" kern_return_t bootstrap_look_up(mach_port_t bp, const char *service_name, mach_port_t *sp);
 #include <sys/proc.h>
@@ -997,23 +998,22 @@ static inline void h672_count_send(const mach_msg_header_t *msg, mach_msg_option
     }
 }
 
-static kern_return_t h672_mach_msg(mach_msg_header_t *msg, mach_msg_option_t option,
-    mach_msg_size_t send_size, mach_msg_size_t receive_size, mach_msg_timeout_t timeout,
-    mach_port_t notify, mach_port_t receive_port, mach_port_t send_port)
+static mach_msg_return_t h672_mach_msg(mach_msg_header_t *msg, mach_msg_option_t option,
+    mach_msg_size_t send_size, mach_msg_size_t rcv_size, mach_port_name_t rcv_name,
+    mach_msg_timeout_t timeout, mach_port_name_t notify)
 {
     h672_count_send(msg, option);
-    return mach_msg(msg, option, send_size, receive_size, timeout, notify,
-                    receive_port, send_port);
+    return mach_msg(msg, option, send_size, rcv_size, rcv_name, timeout, notify);
 }
 
-static kern_return_t h672_mach_msg_overwrite(mach_msg_header_t *msg,
-    mach_msg_option_t option, mach_msg_size_t send_size, mach_msg_size_t receive_size,
-    mach_msg_size_t rcv_right, mach_msg_header_t *rcv_msg, mach_port_t rcv_name,
-    mach_msg_timeout_t timeout, mach_port_t notify)
+static mach_msg_return_t h672_mach_msg_overwrite(mach_msg_header_t *msg,
+    mach_msg_option_t option, mach_msg_size_t send_size, mach_msg_size_t rcv_size,
+    mach_port_name_t rcv_name, mach_msg_timeout_t timeout, mach_port_name_t notify,
+    mach_msg_header_t *rcv_msg, mach_msg_size_t rcv_limit)
 {
     h672_count_send(msg, option);
-    return mach_msg_overwrite(msg, option, send_size, receive_size, rcv_right,
-                              rcv_msg, rcv_name, timeout, notify);
+    return mach_msg_overwrite(msg, option, send_size, rcv_size, rcv_name,
+                              timeout, notify, rcv_msg, rcv_limit);
 }
 
 

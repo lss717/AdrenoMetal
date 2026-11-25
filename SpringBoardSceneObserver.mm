@@ -1583,8 +1583,92 @@ static void record_created_context(id context)
     }
 }
 
+/* H653: say what SpringBoard actually asked for.
+
+ * H652 narrowed the desktop blocker to a context whose displayId is 0 while the display reports
+ * 1, and whose layer is nil. The first thing to settle is whether that 0 came in through this
+ * call, because +[CAContext remoteContextWithOptions:] takes exactly such a dictionary. The
+ * existing line only printed the options class name, which cannot answer that.
+ *
+ * This reads the dictionary through plain public NSDictionary API, before the real method runs so
+ * the values are the ones the caller passed rather than anything the implementation may have
+ * changed. Values are described only when they are strings or numbers, so no unknown -description
+ * implementation is invoked, and the entry count is capped. */
+static void describe_context_options(id options)
+{
+    static unsigned calls;
+    if (calls >= 8) {
+        return;
+    }
+    ++calls;
+    if (!options) {
+        line_reserved("event=h653_options idx=%u nil=1", calls - 1);
+        return;
+    }
+    const SEL respondsSel = sel_getUid("respondsToSelector:");
+    const BOOL (*responds)(id, SEL, SEL) = (const BOOL (*)(id, SEL, SEL)) objc_msgSend;
+    if (!responds(options, respondsSel, sel_getUid("count"))) {
+        line_reserved("event=h653_options idx=%u cls=%.24s no-count=1", calls - 1,
+                      object_getClassName(options));
+        return;
+    }
+    const unsigned long long n = ((unsigned long long (*)(id, SEL)) objc_msgSend)(
+        options, sel_getUid("count"));
+    id keys = nil;
+    if (responds(options, respondsSel, sel_getUid("allKeys"))) {
+        @try {
+            keys = ((id (*)(id, SEL)) objc_msgSend)(options, sel_getUid("allKeys"));
+        } @catch (id ignored) { keys = nil; }
+    }
+    line_reserved("event=h653_options idx=%u cls=%.24s entries=%llu keys=%d", calls - 1,
+                  object_getClassName(options), n, keys ? 1 : 0);
+    if (!keys) {
+        return;
+    }
+    const unsigned long long kn = ((unsigned long long (*)(id, SEL)) objc_msgSend)(
+        keys, sel_getUid("count"));
+    for (unsigned long long i = 0; i < kn && i < 8; ++i) {
+        id key = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(
+            keys, sel_getUid("objectAtIndex:"), i);
+        id value = nil;
+        if (responds(options, respondsSel, sel_getUid("objectForKey:"))) {
+            @try {
+                value = ((id (*)(id, SEL, id)) objc_msgSend)(
+                    options, sel_getUid("objectForKey:"), key);
+            } @catch (id ignored) { value = nil; }
+        }
+        const BOOL (*isKind)(id, SEL, Class) = (const BOOL (*)(id, SEL, Class)) objc_msgSend;
+        const char * (*toUtf8)(id, SEL) = (const char * (*)(id, SEL)) objc_msgSend;
+        const Class stringClass = [NSString class];
+        const Class numberClass = [NSNumber class];
+
+        const char *keyClass = key ? object_getClassName(key) : "-";
+        char keyText[48] = "-";
+        if (key && isKind(key, sel_getUid("isKindOfClass:"), stringClass)) {
+            const char *s = toUtf8(key, sel_getUid("UTF8String"));
+            snprintf(keyText, sizeof keyText, "%.40s", s ? s : "-");
+        }
+
+        const char *valueClass = value ? object_getClassName(value) : "-";
+        char valueText[48] = "-";
+        if (value && isKind(value, sel_getUid("isKindOfClass:"), stringClass)) {
+            const char *s = toUtf8(value, sel_getUid("UTF8String"));
+            snprintf(valueText, sizeof valueText, "s:%.30s", s ? s : "-");
+        } else if (value && isKind(value, sel_getUid("isKindOfClass:"), numberClass)) {
+            id desc = ((id (*)(id, SEL)) objc_msgSend)(value, sel_getUid("description"));
+            const char *s = desc ? toUtf8(desc, sel_getUid("UTF8String")) : NULL;
+            snprintf(valueText, sizeof valueText, "n:%.30s", s ? s : "-");
+        } else if (value) {
+            snprintf(valueText, sizeof valueText, "not-described");
+        }
+        line_reserved("event=h653_entry idx=%u i=%llu kcls=%.16s key=%.40s vcls=%.20s val=%.40s",
+                      calls - 1, i, keyClass, keyText, valueClass, valueText);
+    }
+}
+
 static id trace_context_remote_with_options(id self, SEL selector, id options)
 {
+    describe_context_options(options);
     id context = ((id (*)(id, SEL, id)) gContextRemoteWithOptions)(
         self, selector, options);
     unsigned long long contextId = 0;
@@ -2515,7 +2599,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H652", process, getpid());
+    line("observer load process=%s pid=%d build=H653", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

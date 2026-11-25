@@ -1991,10 +1991,6 @@ static id gH680Contexts[8];
 static unsigned long long gH680CtxIds[8];
 static unsigned char gH680Reported[8];
 static unsigned gH680Count;
-extern "C" kern_return_t vm_read_overwrite(vm_map_t target_task,
-    vm_address_t address, vm_size_t size, vm_address_t data,
-    mach_msg_type_number_t *data_size);
-
 /* H681: every cross-object read goes through vm_read_overwrite, so a
  * wrong guess at the layout returns an error instead of a SIGSEGV
  * (H680c: a blind dereference of CAContext+0xd0 crash-looped
@@ -2007,14 +2003,14 @@ static bool gH680LayoutTried;
 
 static bool h680_read(uintptr_t addr, void *dst, unsigned size)
 {
-    mach_msg_type_number_t out = 0;
+    vm_size_t out = 0;
 
     if (addr == 0) {
         return false;
     }
     return vm_read_overwrite(mach_task_self(), (vm_address_t)addr,
         (vm_size_t)size, (vm_address_t)dst, &out) == KERN_SUCCESS &&
-        out == size;
+        out == (vm_size_t)size;
 }
 
 static bool h680_pointer_like(uintptr_t v)

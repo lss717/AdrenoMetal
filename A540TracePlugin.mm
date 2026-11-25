@@ -776,6 +776,14 @@ static unsigned gHostClassCount;
  * by itself a rejection, because SpringBoard writes the same single slot. */
 static void publish_backboardd_summary(void)
 {
+    /* H665: open the tunnel first.  H664 moved this call out of
+     * query_published_desktop_context, which had already connected, into the class
+     * inventory, where nothing had.  Without a connection the ABI call cannot reach the
+     * kernel, and the only place that reported it was a plugin log line, which has not been
+     * collectable since H658, so the failure was invisible. */
+    if (!connectAccelerator()) {
+        return;
+    }
     NativeAdrenoAbiMetadata meta;
     memset(&meta, 0, sizeof meta);
     /* H664: name the process that counted.  The plugin is loaded by more than one process,
@@ -2421,7 +2429,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H664");
+    caller("builder", "build", "H665");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

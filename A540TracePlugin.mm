@@ -2042,6 +2042,49 @@ static void probe_display_frame(const char *why)
                          cb.size.width, cb.size.height);
                 caller("srv", "ctx", line);
             }
+            /* H658: name the object that puts a client's root layer on the display.
+             *
+             * Section 368 shows the server's own layer tree has no host node and the
+             * display's hit test only ever answers backboardd's contexts. Before hooking a
+             * receive point, list the classes in this process whose names carry Host or
+             * RenderServer, with their superclass and which identity properties they answer,
+             * so the next round targets a selector that actually exists. Read-only, once. */
+            {
+                static bool hostedClassesReported;
+                if (!hostedClassesReported) {
+                    hostedClassesReported = true;
+                    unsigned classCount = 0;
+                    Class *classList = objc_copyClassList(&classCount);
+                    unsigned matched = 0;
+                    char detail[200];
+                    const SEL contextIdSel = NSSelectorFromString(@"contextId");
+                    const SEL remoteIdSel = NSSelectorFromString(@"remoteLayerID");
+                    const SEL layerIdSel = NSSelectorFromString(@"layerID");
+                    const SEL hostIdSel = NSSelectorFromString(@"hostID");
+                    for (unsigned index = 0; classList && index < classCount; ++index) {
+                        const char *name = class_getName(classList[index]);
+                        if (!name || (!strstr(name, "Host") && !strstr(name, "RenderServer"))) {
+                            continue;
+                        }
+                        ++matched;
+                        if (matched > 24) {
+                            continue;
+                        }
+                        const Class parent = class_getSuperclass(classList[index]);
+                        snprintf(detail, sizeof detail,
+                                 "%.52s : %.30s contextId=%d remoteLayerID=%d layerID=%d hostID=%d",
+                                 name, parent ? class_getName(parent) : "-",
+                                 class_getInstanceMethod(classList[index], contextIdSel) ? 1 : 0,
+                                 class_getInstanceMethod(classList[index], remoteIdSel) ? 1 : 0,
+                                 class_getInstanceMethod(classList[index], layerIdSel) ? 1 : 0,
+                                 class_getInstanceMethod(classList[index], hostIdSel) ? 1 : 0);
+                        caller("host", "class", detail);
+                    }
+                    free(classList);
+                    snprintf(detail, sizeof detail, "classes=%u matched=%u", classCount, matched);
+                    caller("host", "inventory", detail);
+                }
+            }
             /* H294's setContext: attempt is intentionally retired.  H416 is an
              * observation-only candidate and must not bind a context, mutate the
              * display, create a layer or synthesize a submission. */
@@ -2320,7 +2363,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H652");
+    caller("builder", "build", "H658");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

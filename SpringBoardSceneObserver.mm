@@ -469,7 +469,6 @@ static void trace_sbiconcontroller_prepare_today(id self, SEL selector)
          getpid(), pthread_main_np(), (__bridge void *) self);
 }
 
-static void h685_control_commit(void);
 
 /* H685e: H685d showed a main-run-loop observer callback never reached
  * three turns in five minutes - the idle main thread parks in the
@@ -3270,81 +3269,6 @@ static void census_once(const char *site)
     }
     done[slot] = true;
     census_ca_contexts(site);
-}
-
-/* H685: one controlled commit to calibrate the whole client-to-server
- * path. Apple's CATransaction documentation guarantees an implicit
- * transaction is committed on the next run loop iteration, so an
- * explicit begin/commit of a real property change must reach the
- * render server as a send. The kernel opens its calibration window on
- * the committed line below: a send seen inside the window names the CA
- * transaction port from behavior alone (no layout or message-id
- * guessing), and a window that times out makes every later zero
- * count undecidable instead of evidence. The property change is the
- * desktop root layer's opacity nudged by 2e-5 - imperceptible, and
- * always different from the value read back.
- *
- * CATransaction class methods are main-thread-only (Apple
- * documentation). H685 first ran this from the reporter thread and
- * SpringBoard aborted repeatedly with no CDC at all - moved to a
- * main-run-loop observer callback below, with the main-thread check
- * re-asserted inside. */
-static void h685_control_commit(void)
-{
-    static unsigned runs;
-    if (runs >= 2 || gH680Count == 0 || !pthread_main_np()) {
-        return;
-    }
-    id ctx = gH680Contexts[gH680Count - 1];
-    const unsigned long long ctxid = gH680CtxIds[gH680Count - 1];
-    id layer = read_object(ctx, "layer");
-    double before = -1.0;
-    if (layer) {
-        @try {
-            id numberValue = [layer valueForKey:@"opacity"];
-            before = [numberValue doubleValue];
-        } @catch (id ignored) {
-            before = -1.0;
-        }
-    }
-    const double target = (before == 0.99998 || before < 0.0)
-        ? 0.99997 : 0.99998;
-    ++runs;
-    line("event=h685_control pid=%d ctxid=0x%llx layer=%.24s before=%.6f target=%.6f run=%u",
-         getpid(), ctxid, layer ? object_getClassName(layer) : "-",
-         before, target, runs);
-    if (!layer) {
-        return;
-    }
-    Class transaction = NSClassFromString(@"CATransaction");
-    if (transaction == NULL) {
-        line("event=h685_control_result pid=%d run=%u result=no-class",
-             getpid(), runs);
-        return;
-    }
-    /* H685d: flush, not begin/commit. H685c showed the property write
-     * opened an implicit transaction but the explicit begin/commit
-     * pair never ran (the turns gate starved while the main thread
-     * idled, and mixing an explicit begin with an open implicit
-     * transaction is not the documented usage anyway). +flush is the
-     * documented synchronous drain on the main thread: it commits the
-     * implicit transaction our setValue just opened, independent of
-     * run loop wake-ups. */
-    SEL flushSel = sel_getUid("flush");
-    if (![transaction respondsToSelector:flushSel]) {
-        line("event=h685_control_result pid=%d run=%u result=no-flush",
-             getpid(), runs);
-        return;
-    }
-    @try {
-        [layer setValue:@(target) forKey:@"opacity"];
-        ((void (*)(id, SEL)) objc_msgSend)(transaction, flushSel);
-        line("event=h685_control_committed pid=%d ctxid=0x%llx run=%u via=flush",
-             getpid(), ctxid, runs);
-    } @catch (id ignored) {
-        line("event=h685_control_result pid=%d run=%u result=exception",
-             getpid(), runs);
-    }
 }
 
 static void *h539_state_reporter(void *context __unused)

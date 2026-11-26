@@ -192,11 +192,13 @@ static void trace_springboard_application_did_finish(
 {
     line("event=h541_did_finish_enter pid=%d thread=%p main=%d",
          getpid(), (void *) pthread_self(), pthread_main_np());
+    h685_f_sync_calibration();
+    line("event=h685_f_returned pid=%d", getpid());
     ((void (*)(id, SEL, id)) gSpringBoardApplicationDidFinishLaunching)(
         self, selector, notification);
     line("event=h541_did_finish_return pid=%d thread=%p main=%d",
          getpid(), (void *) pthread_self(), pthread_main_np());
-    h685_f_sync_calibration();
+    line("event=h685_f_done pid=%d ran=%d", getpid(), 1);
     gDidFinishReturned = true;
     schedule_application_scene_probe(0);
     log_application_scene_state("h542_after_did_finish");
@@ -3320,7 +3322,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H685f", process, getpid());
+    line("observer load process=%s pid=%d build=H685f2", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

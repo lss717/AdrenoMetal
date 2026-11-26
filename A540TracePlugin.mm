@@ -246,6 +246,18 @@ static uint32_t observer_u32(id object, const char *name, uint32_t fallback)
     @catch (id ignored) { return fallback; }
 }
 
+/* H697: taskNamePortOfContextId: hands back a name in THIS process's port space that the
+ * WindowServer itself keeps using. Six boots (H690-H694, H696) ended with this
+ * process exiting ns=23 code=0x200002000000<name>03 (Mach port guard INVALID_NAME)
+ * ~0.55 ms after the Q publish path ran the getter plus pid_for_task plus
+ * mach_port_deallocate, and the guarded name equals the task field that the same
+ * boot's ctxchange observer recorded (STATUS 400-401). Until the getter's return-
+ * time ownership convention is proven, skip the getter AND its dependent
+ * queries/deallocations as one group: the Q marker, context ids and display
+ * counts stay, owner pid and task fields report the skipped sentinel. Removing
+ * only the deallocate would risk a leaked right instead. */
+static const int observer_taskname_disabled = 1;
+
 static uint32_t observer_u32_arg(id object, const char *name, uint32_t argument,
                                  uint32_t fallback)
 {
@@ -419,7 +431,7 @@ observe_context_state(const char *why, id server, uint32_t id,
             state->client_port =
                 observer_u32_arg(server, "clientPortOfContextId:", id, 0);
             state->task_name_port =
-                observer_u32_arg(server, "taskNamePortOfContextId:", id, 0);
+                (observer_taskname_disabled ? 0u : observer_u32_arg(server, "taskNamePortOfContextId:", id, 0));
             if (state->task_name_port) {
                 state->owner_status = pid_for_task(
                     (mach_port_name_t) state->task_name_port,
@@ -648,7 +660,7 @@ static void census_server_context_table(const char *why, id server)
             continue;
         }
         const uint32_t client = observer_u32_arg(server, "clientPortOfContextId:", cid, 0);
-        const uint32_t task = observer_u32_arg(server, "taskNamePortOfContextId:", cid, 0);
+        const uint32_t task = (observer_taskname_disabled ? 0u : observer_u32_arg(server, "taskNamePortOfContextId:", cid, 0));
         const uint32_t host = observer_u32_arg(server, "contextIdHostingContextId:", cid, 0);
         int owner = -1;
         kern_return_t st = KERN_FAILURE;
@@ -669,9 +681,9 @@ static void census_server_context_table(const char *why, id server)
             const uint32_t next = cid + 1u;
             const uint32_t prev = cid - 1u;
             const uint32_t ntask =
-                observer_u32_arg(server, "taskNamePortOfContextId:", next, 0);
+                (observer_taskname_disabled ? 0u : observer_u32_arg(server, "taskNamePortOfContextId:", next, 0));
             const uint32_t ptask =
-                observer_u32_arg(server, "taskNamePortOfContextId:", prev, 0);
+                (observer_taskname_disabled ? 0u : observer_u32_arg(server, "taskNamePortOfContextId:", prev, 0));
             snprintf(detail, sizeof detail,
                      "%s adjacent id=0x%x next=0x%x ntask=0x%x prev=0x%x ptask=0x%x",
                      why, cid, next, ntask, prev, ptask);
@@ -690,7 +702,7 @@ static void census_server_context_table(const char *why, id server)
     {
         const uint32_t bad = 0xdeadbeefu;
         const uint32_t client = observer_u32_arg(server, "clientPortOfContextId:", bad, 0);
-        const uint32_t task = observer_u32_arg(server, "taskNamePortOfContextId:", bad, 0);
+        const uint32_t task = (observer_taskname_disabled ? 0u : observer_u32_arg(server, "taskNamePortOfContextId:", bad, 0));
         const uint32_t host = observer_u32_arg(server, "contextIdHostingContextId:", bad, 0);
         int owner = -1;
         kern_return_t st = KERN_FAILURE;
@@ -927,7 +939,7 @@ static void query_published_desktop_context(const char *why, id server)
      * keeps the id= field that this same query has to parse. */
 
     const uint32_t client = observer_u32_arg(server, "clientPortOfContextId:", cid, 0);
-    const uint32_t task = observer_u32_arg(server, "taskNamePortOfContextId:", cid, 0);
+    const uint32_t task = (observer_taskname_disabled ? 0u : observer_u32_arg(server, "taskNamePortOfContextId:", cid, 0));
     const uint32_t host = observer_u32_arg(server, "contextIdHostingContextId:", cid, 0);
     int owner = -1;
     kern_return_t pidStatus = KERN_FAILURE;
@@ -981,8 +993,8 @@ static void query_published_desktop_context(const char *why, id server)
     }
 
     /* The same adjacent control as the census, so a non-zero here cannot be an index artefact. */
-    const uint32_t ntask = observer_u32_arg(server, "taskNamePortOfContextId:", cid + 1u, 0);
-    const uint32_t ptask = observer_u32_arg(server, "taskNamePortOfContextId:", cid - 1u, 0);
+    const uint32_t ntask = (observer_taskname_disabled ? 0u : observer_u32_arg(server, "taskNamePortOfContextId:", cid + 1u, 0));
+    const uint32_t ptask = (observer_taskname_disabled ? 0u : observer_u32_arg(server, "taskNamePortOfContextId:", cid - 1u, 0));
     snprintf(detail, sizeof detail, "%s adjacent id=0x%x ntask=0x%x ptask=0x%x",
              why, cid, ntask, ptask);
     caller("srvpub", "adjacent", detail);
@@ -1068,7 +1080,7 @@ static void probe_display_context_positions(const char *why, id server)
             /* Same lookup interface that was calibrated in H643, so the owner is read the same way
              * and the local/adjacent/invalid controls stay comparable. */
             const uint32_t task =
-                observer_u32_arg(server, "taskNamePortOfContextId:", cid, 0);
+                (observer_taskname_disabled ? 0u : observer_u32_arg(server, "taskNamePortOfContextId:", cid, 0));
             int owner = -1;
             kern_return_t st = KERN_FAILURE;
             if (task) {
@@ -2507,7 +2519,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
     /* H295: the addon is written into the Data volume only when the kernel thinks its
      * content differs, and H294 ran an older bundle without any trace of that.  Print a
      * build id maintained by hand so every boot says which plugin is actually loaded. */
-    caller("builder", "build", "H669");
+    caller("builder", "build", "H697");
     /* H272j: dump the menus synchronously here.  The queues flush once the
      * accelerator connection exists, so these lines survive even when the boot dies
      * before the first timer would have fired (191-215 s in the last two runs). */

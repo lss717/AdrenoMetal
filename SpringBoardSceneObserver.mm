@@ -469,20 +469,25 @@ static void trace_sbiconcontroller_prepare_today(id self, SEL selector)
 
 static void h685_control_commit(void);
 
-/* H685: runs the controlled commit from the main thread only. Every
- * eighth main run loop turn after the desktop context is known; the
- * commit function itself re-checks pthread_main_np. */
-static void h685RunLoopTurn(CFRunLoopObserverRef observer,
-                            CFRunLoopActivity activity, void *info)
+/* H685e: H685d showed a main-run-loop observer callback never reached
+ * three turns in five minutes - the idle main thread parks in the
+ * kernel with fewer than three wake-ups, so waiting for a turn
+ * starves the calibration. dispatch_async on the main queue wakes it
+ * itself and runs the block on the main thread, which is exactly the
+ * documented context for +flush. */
+static void h685ControlBlock(void *context)
 {
-    (void)observer; (void)activity; (void)info;
-    static unsigned turns;
-    ++turns;
-    if (turns < 3) {
-        return;
-    }
-    turns = 0;
+    (void)context;
     h685_control_commit();
+}
+
+static void h685_schedule_main_commit(void)
+{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(45 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        h685_control_commit();
+    });
+    line("event=h685_scheduled pid=%d delay=45", getpid());
 }
 
 static void trace_application_run(id self, SEL selector)
@@ -492,18 +497,8 @@ static void trace_application_run(id self, SEL selector)
         static bool h685Added;
         if (!h685Added) {
             h685Added = true;
-            CFRunLoopObserverRef obs = CFRunLoopObserverCreate(
-                kCFAllocatorDefault, kCFRunLoopAfterWaiting, true, 0,
-                h685RunLoopTurn, NULL);
-            if (obs != NULL) {
-                CFRunLoopAddObserver(CFRunLoopGetMain(), obs,
-                                     kCFRunLoopCommonModes);
-                CFRelease(obs);
-                line("event=h685_observer_added pid=%d", getpid());
-            } else {
-                line("event=h685_observer_added pid=%d result=create-failed",
-                     getpid());
-            }
+            h685_schedule_main_commit();
+            (void)h685ControlBlock;
         }
     }
     line("event=h557_ui_run_enter pid=%d thread=%p main=%d",
@@ -3365,7 +3360,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H685d", process, getpid());
+    line("observer load process=%s pid=%d build=H685e", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

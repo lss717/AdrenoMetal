@@ -234,36 +234,81 @@ static void trace_springboard_application_did_finish(
  * assumption is on record). */
 struct h704_blk { void *block; void *orig; volatile unsigned fired;
     volatile unsigned done; volatile void *ret; };
-static struct h704_blk h704_blks[4];
+/* H706: nonzero initializer keeps the table in __DATA; the linker
+ * rejects adrp fixups against __bss symbols (no address). */
+extern "C" __attribute__((used)) struct h704_blk h704_blks[4] = {
+    { 0, 0, 0, 0, (void *)0xA5A5 }, { 0, 0, 0, 0, (void *)0xA5A5 },
+    { 0, 0, 0, 0, (void *)0xA5A5 }, { 0, 0, 0, 0, (void *)0xA5A5 },
+};
 static unsigned h704_slot_next;
-typedef uintptr_t (*h704_fn)(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
-    uintptr_t, uintptr_t, uintptr_t, uintptr_t);
-static uintptr_t h704_call_orig(int slot, const uintptr_t *a)
+/* H706: the C forwarding stub dropped q0-q7 (FP args) - a block invoked
+ * with doubles would have seen garbage. These naked trampolines save and
+ * restore x0-x7 AND q0-q7 around the note calls and call the ORIGINAL
+ * invoke with the exact incoming argument state, then log the returned
+ * x0. Non-static so the asm can name them; no allocation, no retain -
+ * block lifetime is untouched. */
+__attribute__((used)) void h704_note_enter(int slot, void *block)
 {
     struct h704_blk *b = &h704_blks[slot];
     if (!b->fired) {
         b->fired = 1;
-        line("event=h704_block_invoked slot=%d block=%p a1=0x%lx a2=0x%lx",
-             slot, b->block, (unsigned long)a[1], (unsigned long)a[2]);
+        line("event=h704_block_invoked slot=%d block=%p", slot, block);
     }
-    uintptr_t r = ((h704_fn)b->orig)(a[0], a[1], a[2], a[3], a[4], a[5],
-        a[6], a[7]);
+}
+__attribute__((used)) void h704_note_exit(int slot, void *ret)
+{
+    struct h704_blk *b = &h704_blks[slot];
     if (!b->done) {
         b->done = 1;
-        b->ret = (void *)r;
-        line("event=h704_block_returned slot=%d ret=%p", slot, (void *)r);
+        b->ret = ret;
+        line("event=h704_block_returned slot=%d ret=%p", slot, ret);
     }
-    return r;
 }
-#define H704_STUB(n) \
-static uintptr_t h704_stub##n(uintptr_t a0, uintptr_t a1, uintptr_t a2, \
-    uintptr_t a3, uintptr_t a4, uintptr_t a5, uintptr_t a6, uintptr_t a7) \
-{ uintptr_t a[8] = {a0, a1, a2, a3, a4, a5, a6, a7}; \
-    return h704_call_orig(n, a); }
-H704_STUB(0)
-H704_STUB(1)
-H704_STUB(2)
-H704_STUB(3)
+#define H704_ASM_STUB(n) \
+__attribute__((naked)) static void h704_stub##n(void) { \
+    __asm__ volatile( \
+        "sub sp, sp, #240\n" \
+        "stp q0, q1, [sp, #0]\n" \
+        "stp q2, q3, [sp, #32]\n" \
+        "stp q4, q5, [sp, #64]\n" \
+        "stp q6, q7, [sp, #96]\n" \
+        "stp x0, x1, [sp, #128]\n" \
+        "stp x2, x3, [sp, #144]\n" \
+        "stp x4, x5, [sp, #160]\n" \
+        "stp x6, x7, [sp, #176]\n" \
+        "stp x19, x30, [sp, #192]\n" \
+        "mov x19, #" #n "\n" \
+        "mov x0, x19\n" \
+        "ldr x1, [sp, #128]\n" \
+        "bl _h704_note_enter\n" \
+        "ldp x0, x1, [sp, #128]\n" \
+        "ldp x2, x3, [sp, #144]\n" \
+        "ldp x4, x5, [sp, #160]\n" \
+        "ldp x6, x7, [sp, #176]\n" \
+        "ldp q0, q1, [sp, #0]\n" \
+        "ldp q2, q3, [sp, #32]\n" \
+        "ldp q4, q5, [sp, #64]\n" \
+        "ldp q6, q7, [sp, #96]\n" \
+        "adrp x16, _h704_blks@PAGE\n" \
+        "add x16, x16, _h704_blks@PAGEOFF\n" \
+        "add x16, x16, x19, lsl #5\n" \
+        "ldr x16, [x16, #8]\n" \
+        "blr x16\n" \
+        "str x0, [sp, #208]\n" \
+        "mov x0, x19\n" \
+        "mov x1, x0\n" \
+        "ldr x1, [sp, #208]\n" \
+        "bl _h704_note_exit\n" \
+        "ldr x0, [sp, #208]\n" \
+        "ldp x19, x30, [sp, #192]\n" \
+        "add sp, sp, #240\n" \
+        "ret\n" \
+    ); \
+}
+H704_ASM_STUB(0)
+H704_ASM_STUB(1)
+H704_ASM_STUB(2)
+H704_ASM_STUB(3)
 static void h704_patch_block(id result, const char *cls)
 {
     if (!result || h704_slot_next >= 4) return;
@@ -272,8 +317,9 @@ static void h704_patch_block(id result, const char *cls)
     void *orig = (void *)w[2];
     if (!orig) return;
     int slot = (int)h704_slot_next;
-    static void *stubs[4] = { (void *)h704_stub0, (void *)h704_stub1,
-        (void *)h704_stub2, (void *)h704_stub3 };
+    static void *stubs[4] = { (void *)(uintptr_t)&h704_stub0,
+        (void *)(uintptr_t)&h704_stub1, (void *)(uintptr_t)&h704_stub2,
+        (void *)(uintptr_t)&h704_stub3 };
     w[2] = (uintptr_t)stubs[slot];
     if (w[2] != (uintptr_t)stubs[slot]) {
         line("event=h704_block_ro pid=%d", getpid());
@@ -3409,7 +3455,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H704", process, getpid());
+    line("observer load process=%s pid=%d build=H706", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

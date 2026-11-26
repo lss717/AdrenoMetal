@@ -3205,12 +3205,75 @@ static void census_once(const char *site)
     census_ca_contexts(site);
 }
 
+/* H685: one controlled commit to calibrate the whole client-to-server
+ * path. Apple's CATransaction documentation guarantees an implicit
+ * transaction is committed on the next run loop iteration, so an
+ * explicit begin/commit of a real property change must reach the
+ * render server as a send. The kernel opens its calibration window on
+ * the committed line below: a send seen inside the window names the CA
+ * transaction port from behavior alone (no layout or message-id
+ * guessing), and a window that times out makes every later zero
+ * count undecidable instead of evidence. The property change is the
+ * desktop root layer's opacity nudged by 2e-5 - imperceptible, and
+ * always different from the value read back. */
+static void h685_control_commit(void)
+{
+    static unsigned runs;
+    if (runs >= 2 || gH680Count == 0) {
+        return;
+    }
+    id ctx = gH680Contexts[gH680Count - 1];
+    const unsigned long long ctxid = gH680CtxIds[gH680Count - 1];
+    id layer = read_object(ctx, "layer");
+    double before = -1.0;
+    if (layer) {
+        @try {
+            id numberValue = [layer valueForKey:@"opacity"];
+            before = [numberValue doubleValue];
+        } @catch (id ignored) {
+            before = -1.0;
+        }
+    }
+    const double target = (before == 0.99998 || before < 0.0)
+        ? 0.99997 : 0.99998;
+    ++runs;
+    line("event=h685_control pid=%d ctxid=0x%llx layer=%.24s before=%.6f target=%.6f run=%u",
+         getpid(), ctxid, layer ? object_getClassName(layer) : "-",
+         before, target, runs);
+    if (!layer) {
+        return;
+    }
+    Class transaction = NSClassFromString(@"CATransaction");
+    if (transaction == NULL) {
+        line("event=h685_control_result pid=%d run=%u result=no-class",
+             getpid(), runs);
+        return;
+    }
+    @try {
+        ((void (*)(id, SEL)) objc_msgSend)(transaction,
+            sel_getUid("begin"));
+        ((void (*)(id, SEL, BOOL)) objc_msgSend)(transaction,
+            sel_getUid("setDisableActions:"), YES);
+        [layer setValue:@(target) forKey:@"opacity"];
+        ((void (*)(id, SEL)) objc_msgSend)(transaction,
+            sel_getUid("commit"));
+        line("event=h685_control_committed pid=%d ctxid=0x%llx run=%u",
+             getpid(), ctxid, runs);
+    } @catch (id ignored) {
+        line("event=h685_control_result pid=%d run=%u result=exception",
+             getpid(), runs);
+    }
+}
+
 static void *h539_state_reporter(void *context __unused)
 {
     for (unsigned interval = 1; interval <= 40; ++interval) {
         sleep(30);
         rearm_exception_reporters("periodic");
         h680_repoll_render_ports(interval);
+        if (interval % 2 == 0) {
+            h685_control_commit();
+        }
         line_reserved("event=h572_observer_alive sample=%u pid=%d main=%d ls=0x%x",
                       interval * 30, getpid(), pthread_main_np(),
                       h539_installer_state());
@@ -3254,7 +3317,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H684", process, getpid());
+    line("observer load process=%s pid=%d build=H685", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

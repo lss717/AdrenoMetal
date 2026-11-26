@@ -195,6 +195,7 @@ static void trace_springboard_application_did_finish(
         self, selector, notification);
     line("event=h541_did_finish_return pid=%d thread=%p main=%d",
          getpid(), (void *) pthread_self(), pthread_main_np());
+    h685_f_sync_calibration();
     gDidFinishReturned = true;
     schedule_application_scene_probe(0);
     log_application_scene_state("h542_after_did_finish");
@@ -475,19 +476,54 @@ static void h685_control_commit(void);
  * starves the calibration. dispatch_async on the main queue wakes it
  * itself and runs the block on the main thread, which is exactly the
  * documented context for +flush. */
-static void h685ControlBlock(void *context)
+/* H685f: synchronous main-thread calibration at didFinishLaunching's
+ * return. H685e's dispatch_async never ran: the main thread stalled in
+ * the telephony synchronous XPC for the whole window, so anything
+ * queued to the run loop starves. This runs inline before that stall
+ * is possible (didFinishLaunching always completes first), arms the
+ * kernel window by emitting the committed line first, and then makes
+ * a remoteContextWithOptions RPC - a client-to-server transaction in
+ * exactly the channel the probe is looking for. The calibration
+ * context is deliberately retained: releasing it would tear down the
+ * connection the kernel just learned about. */
+static void h685_f_sync_calibration(void)
 {
-    (void)context;
-    h685_control_commit();
-}
-
-static void h685_schedule_main_commit(void)
-{
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(45 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        h685_control_commit();
-    });
-    line("event=h685_scheduled pid=%d delay=45", getpid());
+    static bool done;
+    if (done || !pthread_main_np()) {
+        return;
+    }
+    done = true;
+    line("event=h685_control_committed pid=%d ctxid=0x0 mode=sync",
+         getpid());
+    Class ctxClass = NSClassFromString(@"CAContext");
+    if (ctxClass == NULL) {
+        line("event=h685_control_result pid=%d result=no-CAContext",
+             getpid());
+        return;
+    }
+    SEL sel = sel_getUid("remoteContextWithOptions:");
+    if (!((BOOL (*)(id, SEL, SEL)) objc_msgSend)((id)ctxClass,
+            sel_getUid("respondsToSelector:"), sel)) {
+        line("event=h685_control_result pid=%d result=no-selector",
+             getpid());
+        return;
+    }
+    @autoreleasepool {
+        NSMutableDictionary *opts = [NSMutableDictionary dictionary];
+        opts[@"displayId"] = @(1);
+        opts[@"secure"] = @(0);
+        @try {
+            id ctx = ((id (*)(id, SEL, id)) objc_msgSend)((id)ctxClass,
+                sel, opts);
+            unsigned long long cid = 0;
+            read_integer(ctx, "contextId", &cid);
+            line("event=h685_control_ctx pid=%d made=%d id=0x%llx",
+                 getpid(), ctx ? 1 : 0, cid);
+        } @catch (id ignored) {
+            line("event=h685_control_result pid=%d result=exception",
+                 getpid());
+        }
+    }
 }
 
 static void trace_application_run(id self, SEL selector)
@@ -497,8 +533,7 @@ static void trace_application_run(id self, SEL selector)
         static bool h685Added;
         if (!h685Added) {
             h685Added = true;
-            h685_schedule_main_commit();
-            (void)h685ControlBlock;
+            line("event=h685_f_armed_site pid=%d", getpid());
         }
     }
     line("event=h557_ui_run_enter pid=%d thread=%p main=%d",
@@ -3360,7 +3395,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H685e", process, getpid());
+    line("observer load process=%s pid=%d build=H685f", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

@@ -2630,6 +2630,76 @@ static bool install_class_hook(Class cls, const char *name,
     return true;
 }
 
+/* H700: at-return snapshot of -[_completeStartupAfterMainSceneConnect:].
+ * The main-scene-connected handler blr's [ret+0x10] (the arm64 block invoke
+ * slot) with no guard and faults with pc=0 every SB generation (STATUS
+ * 404/405).  Find the declaring class by scanning instance method lists for
+ * the selector, swap in a wrapper that calls the original unchanged, then
+ * reads the returned object's first three words IN-PROCESS at the moment it
+ * is certainly alive (no retain, no deferral) and logs them with pid and
+ * scene pointer.  The kernel pairs the crash-side state through the new
+ * NATIVE_TRAP_BLOCK line (same pointer read at the fault).  Null invoke at
+ * return means the generator or one of our startup bypasses produced it;
+ * null only at crash means something in the didConnect fan-out changed or
+ * freed the object. */
+static IMP h700_original = NULL;
+
+static id h700_complete_hook(id self, SEL _cmd, id scene)
+{
+    id result = ((id (*)(id, SEL, id))h700_original)(self, _cmd, scene);
+    uintptr_t words[3] = { 0, 0, 0 };
+    if (result) {
+        volatile const uintptr_t *w = (volatile const uintptr_t *)result;
+        words[0] = w[0];
+        words[1] = w[1];
+        words[2] = w[2];
+    }
+    line("event=h700_ret rcls=%.40s self=%.40s obj=%p isa=0x%lx w8=0x%lx invoke=0x%lx pid=%d scene=%p",
+         result ? object_getClassName(result) : "-",
+         self ? object_getClassName(self) : "-",
+         result, (unsigned long)words[0], (unsigned long)words[1],
+         (unsigned long)words[2], getpid(), scene);
+    return result;
+}
+
+static void install_h700_probe(void)
+{
+    SEL target = sel_registerName("_completeStartupAfterMainSceneConnect:");
+    unsigned count = 0;
+    Class *classes = objc_copyClassList(&count);
+    if (!classes) {
+        line("event=h700_probe cls-list=0");
+        return;
+    }
+    unsigned found = 0;
+    for (unsigned i = 0; i < count; ++i) {
+        unsigned mcount = 0;
+        Method *methods = class_copyMethodList(classes[i], &mcount);
+        for (unsigned j = 0; j < mcount; ++j) {
+            if (method_getName(methods[j]) != target) {
+                continue;
+            }
+            ++found;
+            const char *enc = method_getTypeEncoding(methods[j]);
+            line("event=h700_found n=%u cls=%.60s enc=%.24s", found,
+                 NSStringFromClass(classes[i]), enc ? enc : "-");
+            if (found == 1) {
+                h700_original = method_getImplementation(methods[j]);
+                method_setImplementation(methods[j], (IMP)h700_complete_hook);
+                line("event=h700_installed cls=%.60s orig=%p",
+                     NSStringFromClass(classes[i]), (void *)h700_original);
+            }
+        }
+        if (methods) {
+            free(methods);
+        }
+    }
+    free(classes);
+    if (!found) {
+        line("event=h700_probe found=0 classes=%u", count);
+    }
+}
+
 static void install_ca_event_hooks(void)
 {
     Class layerHost = NSClassFromString(@"CALayerHost");
@@ -3320,9 +3390,10 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     h672_install_ca_observer_anchor();
     install_h674_got_rebinding();
     install_h557_startup_hooks();
+    install_h700_probe();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H685f2", process, getpid());
+    line("observer load process=%s pid=%d build=H700", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

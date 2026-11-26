@@ -137,6 +137,7 @@ static bool read_integer(id object, const char *name, unsigned long long *value)
 static void trace_uncaught_exception(NSException *exception);
 static void trace_cxx_terminate();
 static void rearm_exception_reporters(const char *site);
+static void h685_f_sync_calibration(void);
 static void schedule_application_scene_probe(unsigned tick);
 static void log_application_scene_state(const char *phase);
 static void snapshot_windows(const char *scope, id owner, unsigned sample);

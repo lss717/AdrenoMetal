@@ -225,6 +225,67 @@ static void trace_springboard_application_did_finish(
     }
 }
 
+/* H704 (STATUS 412): the return snapshot proves the METHOD returned, not
+ * that the caller's blr on [ret+0x10] executed. Swap the block's own
+ * invoke pointer for a per-slot stub: first entry is printed BEFORE
+ * forwarding, the forwarded result AFTER. Read-back verified; a read-only
+ * literal prints h704_block_ro and is skipped. The stub forwards x0-x7
+ * (stock completion blocks pass pointers; FP args would be lost and the
+ * assumption is on record). */
+struct h704_blk { void *block; void *orig; volatile unsigned fired;
+    volatile unsigned done; volatile void *ret; };
+static struct h704_blk h704_blks[4];
+static unsigned h704_slot_next;
+typedef uintptr_t (*h704_fn)(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
+    uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+static uintptr_t h704_call_orig(int slot, const uintptr_t *a)
+{
+    struct h704_blk *b = &h704_blks[slot];
+    if (!b->fired) {
+        b->fired = 1;
+        line("event=h704_block_invoked slot=%d block=%p a1=0x%lx a2=0x%lx",
+             slot, b->block, (unsigned long)a[1], (unsigned long)a[2]);
+    }
+    uintptr_t r = ((h704_fn)b->orig)(a[0], a[1], a[2], a[3], a[4], a[5],
+        a[6], a[7]);
+    if (!b->done) {
+        b->done = 1;
+        b->ret = (void *)r;
+        line("event=h704_block_returned slot=%d ret=%p", slot, (void *)r);
+    }
+    return r;
+}
+#define H704_STUB(n) \
+static uintptr_t h704_stub##n(uintptr_t a0, uintptr_t a1, uintptr_t a2, \
+    uintptr_t a3, uintptr_t a4, uintptr_t a5, uintptr_t a6, uintptr_t a7) \
+{ uintptr_t a[8] = {a0, a1, a2, a3, a4, a5, a6, a7}; \
+    return h704_call_orig(n, a); }
+H704_STUB(0)
+H704_STUB(1)
+H704_STUB(2)
+H704_STUB(3)
+static void h704_patch_block(id result, const char *cls)
+{
+    if (!result || h704_slot_next >= 4) return;
+    if (!cls || !strstr(cls, "Block")) return;
+    volatile uintptr_t *w = (volatile uintptr_t *)(__bridge void *)result;
+    void *orig = (void *)w[2];
+    if (!orig) return;
+    int slot = (int)h704_slot_next;
+    static void *stubs[4] = { (void *)h704_stub0, (void *)h704_stub1,
+        (void *)h704_stub2, (void *)h704_stub3 };
+    w[2] = (uintptr_t)stubs[slot];
+    if (w[2] != (uintptr_t)stubs[slot]) {
+        line("event=h704_block_ro pid=%d", getpid());
+        return;
+    }
+    h704_blks[slot].block = (__bridge void *)result;
+    h704_blks[slot].orig = orig;
+    h704_slot_next++;
+    line("event=h704_block_patched slot=%d block=%p invoke=%p", slot,
+         (__bridge void *)result, orig);
+}
+
 /* H700: the real _completeStartupAfterMainSceneConnect: RETURNS a block -
  * SB's main-scene-connected handler stores it and calls [ret+0x10] (arm64
  * block invoke) unguarded, which is exactly where every generation faulted
@@ -240,6 +301,7 @@ static id trace_springboard_complete_startup(id self, SEL selector, id scene)
          getpid(), (void *) pthread_self(), pthread_main_np(),
          (__bridge void *) scene);
     id result = nil;
+    int h704_caught = 0;
     @try {
         result = ((id (*)(id, SEL, id)) gSpringBoardCompleteStartupOriginal)(
             self, selector, scene);
@@ -251,6 +313,7 @@ static id trace_springboard_complete_startup(id self, SEL selector, id scene)
         line_reserved(
             "event=h583_complete_startup_exception_caught pid=%d main=%d class=%s name=%.72s reason=%.144s",
             getpid(), pthread_main_np(), class_name_or_nil(exception), name, reason);
+        h704_caught = 1;
         result = nil;
     }
     uintptr_t h700_words[3] = { 0, 0, 0 };
@@ -264,10 +327,11 @@ static id trace_springboard_complete_startup(id self, SEL selector, id scene)
     }
     rearm_exception_reporters("complete-startup-return");
     line("event=h700_return_snapshot pid=%d main=%d result=%p rcls=%.40s "
-         "isa=0x%lx w8=0x%lx invoke=0x%lx",
+         "isa=0x%lx w8=0x%lx invoke=0x%lx caught=%d",
          getpid(), pthread_main_np(), (__bridge void *) result, h700_class,
          (unsigned long)h700_words[0], (unsigned long)h700_words[1],
-         (unsigned long)h700_words[2]);
+         (unsigned long)h700_words[2], h704_caught);
+    h704_patch_block(result, h700_class);
     return result;
 }
 
@@ -3345,7 +3409,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H700", process, getpid());
+    line("observer load process=%s pid=%d build=H704", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

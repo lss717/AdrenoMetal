@@ -467,9 +467,45 @@ static void trace_sbiconcontroller_prepare_today(id self, SEL selector)
          getpid(), pthread_main_np(), (__bridge void *) self);
 }
 
+static void h685_control_commit(void);
+
+/* H685: runs the controlled commit from the main thread only. Every
+ * eighth main run loop turn after the desktop context is known; the
+ * commit function itself re-checks pthread_main_np. */
+static void h685RunLoopTurn(CFRunLoopObserverRef observer,
+                            CFRunLoopActivity activity, void *info)
+{
+    (void)observer; (void)activity; (void)info;
+    static unsigned turns;
+    ++turns;
+    if (turns < 8) {
+        return;
+    }
+    turns = 0;
+    h685_control_commit();
+}
+
 static void trace_application_run(id self, SEL selector)
 {
     rearm_exception_reporters("ui-run-enter");
+    {
+        static bool h685Added;
+        if (!h685Added) {
+            h685Added = true;
+            CFRunLoopObserverRef obs = CFRunLoopObserverCreate(
+                kCFAllocatorDefault, kCFRunLoopAfterWaiting, true, 0,
+                h685RunLoopTurn, NULL);
+            if (obs != NULL) {
+                CFRunLoopAddObserver(CFRunLoopGetMain(), obs,
+                                     kCFRunLoopCommonModes);
+                CFRelease(obs);
+                line("event=h685_observer_added pid=%d", getpid());
+            } else {
+                line("event=h685_observer_added pid=%d result=create-failed",
+                     getpid());
+            }
+        }
+    }
     line("event=h557_ui_run_enter pid=%d thread=%p main=%d",
          getpid(), (void *) pthread_self(), pthread_main_np());
     gDidFinishReturned = true;
@@ -3215,11 +3251,17 @@ static void census_once(const char *site)
  * guessing), and a window that times out makes every later zero
  * count undecidable instead of evidence. The property change is the
  * desktop root layer's opacity nudged by 2e-5 - imperceptible, and
- * always different from the value read back. */
+ * always different from the value read back.
+ *
+ * CATransaction class methods are main-thread-only (Apple
+ * documentation). H685 first ran this from the reporter thread and
+ * SpringBoard aborted repeatedly with no CDC at all - moved to a
+ * main-run-loop observer callback below, with the main-thread check
+ * re-asserted inside. */
 static void h685_control_commit(void)
 {
     static unsigned runs;
-    if (runs >= 2 || gH680Count == 0) {
+    if (runs >= 2 || gH680Count == 0 || !pthread_main_np()) {
         return;
     }
     id ctx = gH680Contexts[gH680Count - 1];
@@ -3271,9 +3313,6 @@ static void *h539_state_reporter(void *context __unused)
         sleep(30);
         rearm_exception_reporters("periodic");
         h680_repoll_render_ports(interval);
-        if (interval % 2 == 0) {
-            h685_control_commit();
-        }
         line_reserved("event=h572_observer_alive sample=%u pid=%d main=%d ls=0x%x",
                       interval * 30, getpid(), pthread_main_np(),
                       h539_installer_state());
@@ -3317,7 +3356,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H685", process, getpid());
+    line("observer load process=%s pid=%d build=H685b", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

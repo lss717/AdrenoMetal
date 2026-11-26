@@ -478,7 +478,7 @@ static void h685RunLoopTurn(CFRunLoopObserverRef observer,
     (void)observer; (void)activity; (void)info;
     static unsigned turns;
     ++turns;
-    if (turns < 8) {
+    if (turns < 3) {
         return;
     }
     turns = 0;
@@ -3291,15 +3291,24 @@ static void h685_control_commit(void)
              getpid(), runs);
         return;
     }
+    /* H685d: flush, not begin/commit. H685c showed the property write
+     * opened an implicit transaction but the explicit begin/commit
+     * pair never ran (the turns gate starved while the main thread
+     * idled, and mixing an explicit begin with an open implicit
+     * transaction is not the documented usage anyway). +flush is the
+     * documented synchronous drain on the main thread: it commits the
+     * implicit transaction our setValue just opened, independent of
+     * run loop wake-ups. */
+    SEL flushSel = sel_getUid("flush");
+    if (![transaction respondsToSelector:flushSel]) {
+        line("event=h685_control_result pid=%d run=%u result=no-flush",
+             getpid(), runs);
+        return;
+    }
     @try {
-        ((void (*)(id, SEL)) objc_msgSend)(transaction,
-            sel_getUid("begin"));
-        ((void (*)(id, SEL, BOOL)) objc_msgSend)(transaction,
-            sel_getUid("setDisableActions:"), YES);
         [layer setValue:@(target) forKey:@"opacity"];
-        ((void (*)(id, SEL)) objc_msgSend)(transaction,
-            sel_getUid("commit"));
-        line("event=h685_control_committed pid=%d ctxid=0x%llx run=%u",
+        ((void (*)(id, SEL)) objc_msgSend)(transaction, flushSel);
+        line("event=h685_control_committed pid=%d ctxid=0x%llx run=%u via=flush",
              getpid(), ctxid, runs);
     } @catch (id ignored) {
         line("event=h685_control_result pid=%d run=%u result=exception",
@@ -3356,7 +3365,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H685b", process, getpid());
+    line("observer load process=%s pid=%d build=H685d", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

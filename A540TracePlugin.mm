@@ -1006,6 +1006,39 @@ static void query_published_desktop_context(const char *why, id server)
     }
 }
 
+/* H721: CAWindowServerDisplay gate-state reads.  436 proved the whole-boot
+ * presentSurface negative: the server takes commits (census, published desktop,
+ * bitmap commit waves reach display-owned contexts) yet never composes or
+ * presents.  The dumped method list shows what could keep that loop from
+ * ticking: update gates (isBlanked, disablesUpdates, blankingRemovesPower),
+ * sync plumbing (syncNotificationQueue, updateRequestCallback), and frame
+ * entries (registerForSyncNotifications:withBlock:, renderForTime:).  Only
+ * getters whose encoding allows the call are invoked; the entry encodings are
+ * recorded so a later hook round can pick them by shape. */
+static void probe_display_gate(const char *why, id display)
+{
+    char detail[230];
+    const long long blanked = observer_is_bool(display, "isBlanked")
+        ? (long long) observer_u32(display, "isBlanked", 0xFF) : -1;
+    const long long disables = observer_is_bool(display, "disablesUpdates")
+        ? (long long) observer_u32(display, "disablesUpdates", 0xFF) : -1;
+    const long long powOn = observer_is_bool(display, "blankingRemovesPower")
+        ? (long long) observer_u32(display, "blankingRemovesPower", 0xFF) : -1;
+    const long long minFt = observer_is_u64(display, "minimumFrameTime")
+        ? (long long) observer_u64(display, "minimumFrameTime", 0) : -1;
+    id syncQ = observer_object(display, "syncNotificationQueue");
+    id updCb = observer_object(display, "updateRequestCallback");
+    const char *encReg = observer_encoding(display, "registerForSyncNotifications:withBlock:");
+    const char *encRen = observer_encoding(display, "renderForTime:");
+    snprintf(detail, sizeof detail,
+             "%s blank=%lld dis=%lld pow=%lld minFT=%lld syncQ=%.14s updCb=%.14s reg=%.12s ren=%.6s",
+             why, blanked, disables, powOn, minFt,
+             syncQ ? object_getClassName(syncQ) : "-",
+             updCb ? object_getClassName(updCb) : "-",
+             encReg ? encReg : "-", encRen ? encRen : "-");
+    caller("gate", "read", detail);
+}
+
 static void probe_display_context_positions(const char *why, id server)
 {
     static unsigned rounds;
@@ -1050,6 +1083,7 @@ static void probe_display_context_positions(const char *why, id server)
     snprintf(detail, sizeof detail, "%s port_encoding enc=%.40s called=0", why,
              portEnc ? portEnc : "-");
     caller("srvpos", "port", detail);
+    probe_display_gate(why, display);
 
     /* Four positions: the top-left corner and three points that lie inside the display bounds
      * under both the pixel reading and the point reading. */

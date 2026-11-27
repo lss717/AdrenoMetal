@@ -3386,16 +3386,23 @@ static void h714_tx_state_line(unsigned interval) {
     ++gTxStateSeen;
 }
 
+static volatile int gRepollStuck;
 static void *h539_state_reporter(void *context __unused)
 {
     for (unsigned interval = 1; interval <= 40; ++interval) {
         sleep(30);
-        rearm_exception_reporters("periodic");
-        h680_repoll_render_ports(interval);
-        line_reserved("event=h572_observer_alive sample=%u pid=%d main=%d ls=0x%x",
-                      interval * 30, getpid(), pthread_main_np(),
-                      h539_installer_state());
         h714_tx_state_line(interval);
+        if (!gRepollStuck) {
+            rearm_exception_reporters("periodic");
+            line_reserved("event=h572_observer_alive sample=%u pid=%d main=%d ls=0x%x",
+                          interval * 30, getpid(), pthread_main_np(),
+                          h539_installer_state());
+            gRepollStuck = 1;
+            h680_repoll_render_ports(interval);
+            gRepollStuck = 0;
+        } else {
+            line("event=h715_repoll_stuck pid=%d interval=%u", getpid(), interval);
+        }
     }
     return NULL;
 }
@@ -3436,7 +3443,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H714", process, getpid());
+    line("observer load process=%s pid=%d build=H715", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

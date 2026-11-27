@@ -2665,7 +2665,7 @@ static void log_application_scene_state(const char *phase)
     /* H718c: targeted property reads for the two windows that H718b
      * proved exist but never described: SBCoverSheetWindow (lock
      * carrier) and _SBWallpaperSecureWindow. Index-pinned class
-     * match, then the same safe readers the idx07 pass uses. */
+     * match, then the same safe readers the idx0-7 pass uses. */
     for (unsigned long long index = 0; index < windowCount && index < 16; ++index) {
         id window = collection_object_at(windows, index);
         const char *name = class_name_or_nil(window);

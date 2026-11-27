@@ -2650,6 +2650,18 @@ static void log_application_scene_state(const char *phase)
     line("event=h541_application_state phase=%s pid=%d app=%d windows=%llu scenes=%llu",
          phase, getpid(), application ? 1 : 0, windowCount, sceneCount);
 
+    /* H718b: class-only enumeration first, up to 16 windows.  H718 run2
+     * showed windows=15 but the property pass only reached index 7 before
+     * the observer channel froze; the lock/cover window identity, if any,
+     * lives in indices 8-14 and must survive a later stall in this dump.
+     * class_name_or_nil is a pure runtime lookup: no property read, no
+     * synchronous XPC. */
+    for (unsigned long long index = 0; index < windowCount && index < 16; ++index) {
+        id window = collection_object_at(windows, index);
+        line("event=h541_window_class phase=%s index=%llu class=%.48s",
+             phase, index, class_name_or_nil(window));
+    }
+
     for (unsigned long long index = 0; index < windowCount && index < 8; ++index) {
         id window = collection_object_at(windows, index);
         unsigned long long hidden = 0;
@@ -3448,7 +3460,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H718", process, getpid());
+    line("observer load process=%s pid=%d build=H718b", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

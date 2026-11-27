@@ -1314,6 +1314,11 @@ static void install_h674_got_rebinding(void)
 {
     if (gH674ScanPass >= 2) return;
     ++gH674ScanPass;
+    /* H717 single variable: GOT rebind installation disabled for this
+     * build.  The marker line proves the running dylib carries the
+     * switch and that no image was swapped (STATUS 427 stack). */
+    line_reserved("event=h717_h674_rebind_disabled pid=%d pass=%u", getpid(), gH674ScanPass);
+    return;
     Dl_info self;
     const void *selfBase =
         dladdr((const void *)&h672_mach_msg, &self) ? self.dli_fbase : NULL;
@@ -3443,7 +3448,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H715", process, getpid());
+    line("observer load process=%s pid=%d build=H717", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

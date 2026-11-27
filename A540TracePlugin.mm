@@ -1590,6 +1590,20 @@ static void probe_drawable(const char *why)
     if (createDevice) {
         @try { device = createDevice(); } @catch (id ignored) { device = nil; }
     }
+    /* H718 single variable: this probe used to run [CAMetalLayer alloc] init,
+     * setters, nextDrawable and present on a libdispatch worker queue.  In the
+     * running bundle -[CAMetalLayer init] reaches -[CALayer setContents:] and
+     * QuartzCore's CA_ABORT_ON_NON_MAIN_THREAD_TRANSACTION_PUSH guard aborted
+     * every SpringBoard generation (STATUS 428, A540Trace!+0x7618 = the init
+     * msgSend).  The active creation chain is disabled; class presence and the
+     * device availability check below stay as passive evidence. */
+    {
+        char detail[120];
+        snprintf(detail, sizeof detail, "%s comm=%s device=%d", why, probe_self_name(), device ? 1 : 0);
+        caller("draw", why, detail);
+        caller("draw", "layer", "active-calls-disabled-h718");
+        return;
+    }
     @try {
         id layer = ((id (*)(id, SEL)) objc_msgSend)(((id (*)(id, SEL)) objc_msgSend)(layerClass, @selector(alloc)), @selector(init));
         if (!layer) {

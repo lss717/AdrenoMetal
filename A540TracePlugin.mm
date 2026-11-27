@@ -74,7 +74,7 @@ static const uint32_t kMaxLog = 184;
 static io_connect_t gConnection;
 static uint32_t gSelector;
 static unsigned gSequence;
-static unsigned gBudget = 800;
+static unsigned gBudget = 6000;
 static bool gLoaded;
 static id gDeviceInstance;
 static id gQueueInstance;

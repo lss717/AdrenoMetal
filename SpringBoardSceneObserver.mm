@@ -1317,7 +1317,7 @@ static void install_h674_got_rebinding(void)
     /* H717 single variable: GOT rebind installation disabled for this
      * build.  The marker line proves the running dylib carries the
      * switch and that no image was swapped (STATUS 427 stack). */
-    line_reserved("event=h717_h674_rebind_disabled pid=%d pass=%u", getpid(), gH674ScanPass);
+    line_reserved("event=h717_h674_rebind_disabled pid=%d pass=%llu", getpid(), (unsigned long long)gH674ScanPass);
     return;
     Dl_info self;
     const void *selfBase =

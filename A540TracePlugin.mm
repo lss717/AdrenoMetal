@@ -534,7 +534,7 @@ static void trace_server_context_commit_wait(id self, SEL selector,
 static void trace_server_layer_commit(id self, SEL selector, id layer)
 {
     ((void (*)(id, SEL, id)) gServerLayerDidCommit)(self, selector, layer);
-    if (gServerLayerCommitEvents >= 32) return;
+    if (gServerLayerCommitEvents >= 256) return;
     ++gServerLayerCommitEvents;
     id context = observer_object(self, "context");
     const uint32_t contextId = observer_u32(context, "contextId", UINT32_MAX);
@@ -621,7 +621,7 @@ static void install_server_ca_event_hooks(void)
 static void census_server_context_table(const char *why, id server)
 {
     static unsigned calls;
-    if (!server || calls >= 4) {
+    if (!server || calls >= 8) {
         return;
     }
     ++calls;
@@ -1009,7 +1009,7 @@ static void query_published_desktop_context(const char *why, id server)
 static void probe_display_context_positions(const char *why, id server)
 {
     static unsigned rounds;
-    if (!server || rounds >= 16) {
+    if (!server || rounds >= 32) {
         return;
     }
     ++rounds;
@@ -2598,8 +2598,8 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
      * keeps sampling after SpringBoard creates its context (582.99 s in H645) instead of stopping
      * 61 s before. Load is bounded: 15 blocks, each capped by the rounds guard, each doing at most
      * 4 positions times 4 exclusion steps. */
-    double positionDelays[15];
-    for (unsigned i = 0; i < 15; ++i) {
+    double positionDelays[30];
+    for (unsigned i = 0; i < 30; ++i) {
         positionDelays[i] = 60.0 * (double) (i + 1);
     }
     for (double delay : positionDelays) {
@@ -2614,7 +2614,7 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
             probe_display_context_positions("position", srv);
         });
     }
-    const double delays[] = {30.0, 120.0, 300.0, 480.0};
+    const double delays[] = {30.0, 120.0, 300.0, 480.0, 900.0, 1200.0, 1500.0};
     for (double delay : delays) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             probe_displays("observer");

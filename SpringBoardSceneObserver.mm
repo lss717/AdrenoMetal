@@ -2662,6 +2662,34 @@ static void log_application_scene_state(const char *phase)
              phase, index, class_name_or_nil(window));
     }
 
+    /* H718c: targeted property reads for the two windows that H718b
+     * proved exist but never described: SBCoverSheetWindow (lock
+     * carrier) and _SBWallpaperSecureWindow. Index-pinned class
+     * match, then the same safe readers the idx07 pass uses. */
+    for (unsigned long long index = 0; index < windowCount && index < 16; ++index) {
+        id window = collection_object_at(windows, index);
+        const char *name = class_name_or_nil(window);
+        if (!strstr(name, "CoverSheet") && !strstr(name, "WallpaperSecure")) continue;
+        unsigned long long hidden = 0;
+        unsigned long long visible = 0;
+        const bool hasHidden = read_integer(window, "isHidden", &hidden);
+        const bool hasVisible = read_integer(window, "_isVisible", &visible);
+        id cLayer = read_object(window, "layer");
+        id cScene = read_object(window, "windowScene");
+        line("event=h541_cover_window phase=%s index=%llu window=%s object=%p hidden=%llu hasHidden=%d _isVisible=%llu hasVisible=%d layer=%p scene=%.28s",
+             phase, index, name, (__bridge void *) window, hidden,
+             hasHidden ? 1 : 0, visible, hasVisible ? 1 : 0,
+             (__bridge void *) cLayer, class_name_or_nil(cScene));
+        unsigned long long subs = 0;
+        read_integer(read_object(cLayer, "sublayers"), "count", &subs);
+        id cContents = read_object(cLayer, "contents");
+        unsigned long long cCtxId = 0;
+        const bool cHasCtx = read_integer(cLayer, "contextId", &cCtxId);
+        line("event=h541_cover_layer phase=%s window=%s layer=%p class=%.28s sublayers=%llu contents=%d contentsClass=%.20s contextId=0x%x hasContextId=%d",
+             phase, name, (__bridge void *) cLayer, class_name_or_nil(cLayer),
+             subs, cContents ? 1 : 0, class_name_or_nil(cContents),
+             (unsigned) cCtxId, cHasCtx ? 1 : 0);
+    }
     for (unsigned long long index = 0; index < windowCount && index < 8; ++index) {
         id window = collection_object_at(windows, index);
         unsigned long long hidden = 0;
@@ -3460,7 +3488,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H718b", process, getpid());
+    line("observer load process=%s pid=%d build=H718c", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

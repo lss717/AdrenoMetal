@@ -621,7 +621,7 @@ static void install_server_ca_event_hooks(void)
 static void census_server_context_table(const char *why, id server)
 {
     static unsigned calls;
-    if (!server || calls >= 8) {
+    if (!server || calls >= 16) {
         return;
     }
     ++calls;
@@ -884,7 +884,7 @@ static void publish_backboardd_summary(const char *stage)
 static void query_published_desktop_context(const char *why, id server)
 {
     static unsigned calls;
-    if (!server || calls >= 8) {
+    if (!server || calls >= 24) {
         return;
     }
     ++calls;

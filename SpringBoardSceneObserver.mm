@@ -2662,7 +2662,7 @@ static void log_application_scene_state(const char *phase)
              phase, index, class_name_or_nil(window));
     }
 
-    for (unsigned long long index = 0; index < windowCount && index < 8; ++index) {
+    for (unsigned long long index = 0; index < windowCount && index < 16; ++index) {
         id window = collection_object_at(windows, index);
         unsigned long long hidden = 0;
         unsigned long long visible = 0;
@@ -3460,7 +3460,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H718e", process, getpid());
+    line("observer load process=%s pid=%d build=H718f", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

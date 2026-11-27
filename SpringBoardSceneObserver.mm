@@ -1727,8 +1727,21 @@ static void install_fatal_signal_reporters(void)
         }
         sigaction(SIGILL, &action, NULL);
     }
-    line_reserved("event=h593_signal_hooks pid=%d segv=%d ill=%d",
-                  getpid(), gSegvActionSaved ? 1 : 0, gIllActionSaved ? 1 : 0);
+    if (!gAbortActionSaved) {
+        /* H713: the plain abort() deaths of every SB generation left no user-side
+         * trace because the abort hook was only armed from rearm sites that never
+         * ran. Arm it at load like SEGV/ILL already are. */
+        struct sigaction action;
+        memset(&action, 0, sizeof action);
+        action.sa_sigaction = trace_abort_signal;
+        action.sa_flags = SA_SIGINFO | SA_NODEFER;
+        if (sigaction(SIGABRT, NULL, &gPreviousAbortAction) == 0) {
+            gAbortActionSaved = 1;
+        }
+        sigaction(SIGABRT, &action, NULL);
+    }
+    line_reserved("event=h593_signal_hooks pid=%d segv=%d ill=%d abort=%d",
+                  getpid(), gSegvActionSaved ? 1 : 0, gIllActionSaved ? 1 : 0, gAbortActionSaved ? 1 : 0);
 }
 
 static void rearm_exception_reporters(const char *site)
@@ -3409,7 +3422,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H704", process, getpid());
+    line("observer load process=%s pid=%d build=H713", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

@@ -3373,6 +3373,19 @@ static void census_once(const char *site)
     census_ca_contexts(site);
 }
 
+// H714: periodic state line via the flushing channel (line(), not the
+// pre-CDC reserved buffer) so hook installation and transaction counts
+// are provable even when the ring is unavailable.
+static unsigned gTxStateSeen;
+static void h714_tx_state_line(unsigned interval) {
+    if (interval > 40) return;
+    line("event=h714_tx_state pid=%d pre=%u post=%u hooks=%d ctxs=%u hosts=%u layerCommits=%u interval=%u",
+         getpid(), gTransactionEventCount, gPostDidFinishTransactionEventCount,
+         gTransactionFlushAsRunLoopObserver ? 1 : 0, gContextLayerEventCount,
+         gHostContextEventCount, gLayerCommitEventCount, interval);
+    ++gTxStateSeen;
+}
+
 static void *h539_state_reporter(void *context __unused)
 {
     for (unsigned interval = 1; interval <= 40; ++interval) {
@@ -3382,6 +3395,7 @@ static void *h539_state_reporter(void *context __unused)
         line_reserved("event=h572_observer_alive sample=%u pid=%d main=%d ls=0x%x",
                       interval * 30, getpid(), pthread_main_np(),
                       h539_installer_state());
+        h714_tx_state_line(interval);
     }
     return NULL;
 }
@@ -3422,7 +3436,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H713", process, getpid());
+    line("observer load process=%s pid=%d build=H714", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

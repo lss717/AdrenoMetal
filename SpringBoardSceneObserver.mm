@@ -2665,8 +2665,15 @@ static void log_application_scene_state(const char *phase)
     /* H718c: targeted property reads for the two windows that H718b
      * proved exist but never described: SBCoverSheetWindow (lock
      * carrier) and _SBWallpaperSecureWindow. Index-pinned class
-     * match, then the same safe readers the idx0-7 pass uses. */
-    for (unsigned long long index = 0; index < windowCount && index < 16; ++index) {
+     * match, then the same safe readers the idx0-7 pass uses.
+     * H718d: restrict the cover pass to the did_finish phases only
+     * (h542_after_did_finish / h556_post_did_finish). All four H718c
+     * boots died at col 201-212, before any tick-0 (constructor +30s)
+     * or did_finish pass ran, so no cover code had executed; gating
+     * keeps tick passes class-only like H718b and fires the property
+     * reads once at the proven-safe enumeration moment. */
+    const bool cover_phase = phase && strstr(phase, "did_finish") != nullptr;
+    for (unsigned long long index = 0; cover_phase && index < windowCount && index < 16; ++index) {
         id window = collection_object_at(windows, index);
         const char *name = class_name_or_nil(window);
         if (!strstr(name, "CoverSheet") && !strstr(name, "WallpaperSecure")) continue;
@@ -3488,7 +3495,7 @@ __attribute__((constructor)) static void h481_observer_constructor(void)
     install_h557_startup_hooks();
     NSSetUncaughtExceptionHandler(trace_uncaught_exception);
     install_fatal_signal_reporters();
-    line("observer load process=%s pid=%d build=H718c", process, getpid());
+    line("observer load process=%s pid=%d build=H718d", process, getpid());
     install_application_notifications();
     schedule_application_scene_probe(0);
 

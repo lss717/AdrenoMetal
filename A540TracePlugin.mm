@@ -531,8 +531,6 @@ static void trace_server_context_commit_wait(id self, SEL selector,
     caller("srv", "event_context_commit_wait", detail);
 }
 
-static void trace_server_layer_commit(id self, SEL selector, id layer)
-{
 /* H726 (STATUS 446): the host chain AT COMMIT TIME. The bind-time observer
  * (OBS ca_host_context_bind) proved a CALayerHost object was set up with the
  * cover content contextId, but its snapshot showed super=nil AT THAT INSTANT,
@@ -608,6 +606,8 @@ static void h726_scan_host_chain(uint32_t commitCtx)
              sup2 ? object_getClassName(sup2) : "nil");
     caller("srv", "host_chain", detail);
 }
+static void trace_server_layer_commit(id self, SEL selector, id layer)
+{
     ((void (*)(id, SEL, id)) gServerLayerDidCommit)(self, selector, layer);
     if (gServerLayerCommitEvents >= 256) return;
     ++gServerLayerCommitEvents;

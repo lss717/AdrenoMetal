@@ -85,6 +85,9 @@ static IMP gServerContextSetObjectForSlot;
 static IMP gServerContextWaitForCommitId;
 static IMP gServerLayerDidCommit;
 static IMP gServerDisplayPresentSurface;
+static IMP gServerDisplayRenderForTime;
+static IMP gServerDisplayAddFrameTs;
+static unsigned gServerDispFrameEvents;
 static unsigned gServerContextLayerEvents;
 static unsigned gServerContextSlotEvents;
 static unsigned gServerContextCommitWaits;
@@ -576,6 +579,44 @@ static void trace_server_display_surface(id self, SEL selector,
     caller("srv", "event_display_surface", detail);
 }
 
+
+/* H733 (STATUS 461): compositor-trigger observation on the display class.
+ * The presentSurface: hook has been installed since H716 and never reported a
+ * call while commits were processed (H732, coverage proven by the srv#3
+ * event_hooks lines). renderForTime: and addFramePresentationTimestamp: are
+ * the frame markers the H732 method dump shows on CAWindowServerDisplay:
+ * the first proves the server entered a display frame render, the second
+ * proves it stamped a presented frame. Both forward unchanged first and are
+ * only installed when the method encoding proves a double argument, so the
+ * register layout cannot diverge. Bounded; read-only beyond the forward. */
+static void h733_disp_line(const char *tag, double t, id self)
+{
+    if (gServerDispFrameEvents >= 24) {
+        return;
+    }
+    ++gServerDispFrameEvents;
+    union { double d; unsigned long long u; } cv;
+    cv.d = t;
+    char detail[160];
+    snprintf(detail, sizeof detail,
+             "%s t=%.4f u=0x%llx displayId=0x%x owner=%d/%s",
+             tag, cv.d, cv.u, observer_u32(self, "displayId", UINT32_MAX),
+             getpid(), getprogname() ? getprogname() : "?");
+    caller("srv", "h733", detail);
+}
+
+static void trace_disp_render_time(id self, SEL selector, double t)
+{
+    ((void (*)(id, SEL, double)) gServerDisplayRenderForTime)(self, selector, t);
+    h733_disp_line("renderForTime", t, self);
+}
+
+static void trace_disp_add_frame_ts(id self, SEL selector, double t)
+{
+    ((void (*)(id, SEL, double)) gServerDisplayAddFrameTs)(self, selector, t);
+    h733_disp_line("addFrameTs", t, self);
+}
+
 static void install_server_ca_event_hooks(void)
 {
     Class context = NSClassFromString(@"CAContext");
@@ -596,6 +637,32 @@ static void install_server_ca_event_hooks(void)
     const bool displaySurface = install_trace_instance_hook(
         display, "presentSurface:withOptions:",
         (IMP) trace_server_display_surface, &gServerDisplayPresentSurface);
+    /* H733: encoding-gated frame-marker hooks; an absent or non-double
+     * signature is reported and left unhooked - the log line is the
+     * coverage statement, not silence. */
+    const char *encRt = "absent", *encTs = "absent";
+    bool rtHooked = false, tsHooked = false;
+    if (display) {
+        Method mRt = class_getInstanceMethod(display, @selector(renderForTime:));
+        Method mTs = class_getInstanceMethod(display,
+            @selector(addFramePresentationTimestamp:));
+        if (mRt) { encRt = method_getTypeEncoding(mRt); }
+        if (mTs) { encTs = method_getTypeEncoding(mTs); }
+        if (mRt && strstr(encRt, "d16")) {
+            rtHooked = install_trace_instance_hook(display, "renderForTime:",
+                (IMP) trace_disp_render_time, &gServerDisplayRenderForTime);
+        }
+        if (mTs && strstr(encTs, "d16")) {
+            tsHooked = install_trace_instance_hook(display,
+                "addFramePresentationTimestamp:",
+                (IMP) trace_disp_add_frame_ts, &gServerDisplayAddFrameTs);
+        }
+    }
+    char hdetail[200];
+    snprintf(hdetail, sizeof hdetail,
+             "render enc=%.16s hooked=%d addTs enc=%.16s hooked=%d display=%d",
+             encRt, rtHooked ? 1 : 0, encTs, tsHooked ? 1 : 0, display ? 1 : 0);
+    caller("srv", "h733-enc", hdetail);
     char detail[180];
     snprintf(detail, sizeof detail,
              "contextLayer=%d contextSlot=%d commitWait=%d layerCommit=%d displaySurface=%d",
@@ -2207,6 +2274,26 @@ static void probe_display_frame(const char *why)
                      observer_encoding(d0, "layer") ? observer_encoding(d0, "layer") : "UNSUPPORTED",
                      flags, nctx, getpid());
             caller("srv", "state", state);
+            /* H733: scheduler-side display state via REAL accessors (the
+             * d0ctx field above is a getter artifact per H684b): update-request
+             * callback registered? compositing allowed? display blanked?
+             * presence/method split so a zero never reads as an absent API. */
+            {
+                const bool haveBlank = observer_method(d0, "isBlanked") != nil;
+                const bool haveUpd = observer_method(d0, "updateRequestCallback") != nil;
+                const bool haveComp = observer_method(d0, "allowsDisplayCompositing") != nil;
+                char trig[170];
+                snprintf(trig, sizeof trig,
+                         "%s blank=%d/%d updcb=%d/%d comp=%d/%d d0id=0x%x pid=%d",
+                         why, haveBlank ? 1 : 0,
+                         haveBlank ? (int) observer_bool(d0, "isBlanked", false) : -1,
+                         haveUpd ? 1 : 0,
+                         (haveUpd && observer_object(d0, "updateRequestCallback")) ? 1 : 0,
+                         haveComp ? 1 : 0,
+                         haveComp ? (int) observer_bool(d0, "allowsDisplayCompositing", false) : -1,
+                         d0id, getpid());
+                caller("srv", "h733-state", trig);
+            }
             /* H292: the display has no context while two exist.  Describe each one:
              * its id, client port, layer class, layer bounds, sublayer count and whether
              * the layer already carries contents.  Read-only. */
@@ -2614,7 +2701,8 @@ __attribute__((constructor)) static void a540_early_display_probe(void)
             probe_display_context_positions("position", srv);
         });
     }
-    const double delays[] = {30.0, 120.0, 300.0, 480.0, 900.0, 1200.0, 1500.0};
+    const double delays[] = {30.0, 120.0, 300.0, 480.0, 900.0, 1200.0, 1500.0,
+                          1900.0, 2300.0, 2700.0, 3100.0}; /* H733: cover the wave */
     for (double delay : delays) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (delay * 1e9)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             probe_displays("observer");

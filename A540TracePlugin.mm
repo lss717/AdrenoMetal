@@ -884,7 +884,7 @@ static void publish_backboardd_summary(const char *stage)
 static void query_published_desktop_context(const char *why, id server)
 {
     static unsigned calls;
-    if (!server || calls >= 24) {
+    if (!server || calls >= 96) {
         return;
     }
     ++calls;
@@ -1009,7 +1009,7 @@ static void query_published_desktop_context(const char *why, id server)
 static void probe_display_context_positions(const char *why, id server)
 {
     static unsigned rounds;
-    if (!server || rounds >= 32) {
+    if (!server || rounds >= 96) {
         return;
     }
     ++rounds;

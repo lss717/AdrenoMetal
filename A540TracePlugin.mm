@@ -533,6 +533,81 @@ static void trace_server_context_commit_wait(id self, SEL selector,
 
 static void trace_server_layer_commit(id self, SEL selector, id layer)
 {
+/* H726 (STATUS 446): the host chain AT COMMIT TIME. The bind-time observer
+ * (OBS ca_host_context_bind) proved a CALayerHost object was set up with the
+ * cover content contextId, but its snapshot showed super=nil AT THAT INSTANT,
+ * and the first root commit of that context arrives ~195 s later. This scan
+ * runs in the committing process (the owner=27 rows prove this hook fires in
+ * SpringBoard), once per distinct root-commit context, and finds the host
+ * object by the same proven binding: a CALayerHost whose context.contextId
+ * equals the committed context, reachable within two levels below any local
+ * CAContext layer. It reports the host's superlayer class, that superlayer's
+ * owning contextId and the owner context's displayId (the display-binding
+ * identity), one further hop, and the host's own sublayers count (the slot
+ * where the committed context's root layer should sit if it was inserted).
+ * Read-only and bounded: <=16 contexts scanned once each, <=8 sublayers per
+ * level. found=0 with a proven-bind ctx is a COVERAGE gap, not a refusal.
+ * found=1 super-nil means genuinely detached at commit time. */
+static uint32_t gH726Scanned[16];
+static unsigned gH726ScanCount;
+
+static id h726_host_below(id parent, uint32_t commitCtx)
+{
+    id subs = observer_object(parent, "sublayers");
+    const unsigned n = observer_u32(subs, "count", 0);
+    for (unsigned j = 0; j < n && j < 8; ++j) {
+        id sub = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(
+            subs, @selector(objectAtIndex:), (unsigned long long) j);
+        if (!sub) continue;
+        if (strstr(object_getClassName(sub), "CALayerHost") &&
+            observer_u32(observer_object(sub, "context"), "contextId", UINT32_MAX) == commitCtx)
+            return sub;
+    }
+    return nil;
+}
+
+static void h726_scan_host_chain(uint32_t commitCtx)
+{
+    if (gH726ScanCount >= sizeof gH726Scanned / sizeof gH726Scanned[0]) return;
+    for (unsigned i = 0; i < gH726ScanCount; ++i) if (gH726Scanned[i] == commitCtx) return;
+    gH726Scanned[gH726ScanCount++] = commitCtx;
+    Class ctxClass = NSClassFromString(@"CAContext");
+    char detail[240];
+    if (!ctxClass) { caller("srv", "host_chain", "ctx=0 NO-CAContext"); return; }
+    id all = ((id (*)(Class, SEL)) objc_msgSend)(ctxClass, sel_getUid("allContexts"));
+    const unsigned nctx = observer_u32(all, "count", 0);
+    id host = nil;
+    for (unsigned i = 0; i < nctx && i < 16 && !host; ++i) {
+        id ctx = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(
+            all, @selector(objectAtIndex:), (unsigned long long) i);
+        id layer = observer_object(ctx, "layer");
+        host = h726_host_below(layer, commitCtx);
+        if (host) break;
+        id subs = observer_object(layer, "sublayers");
+        const unsigned ns = observer_u32(subs, "count", 0);
+        for (unsigned j = 0; j < ns && j < 8 && !host; ++j) {
+            id child = ((id (*)(id, SEL, unsigned long long)) objc_msgSend)(
+                subs, @selector(objectAtIndex:), (unsigned long long) j);
+            host = h726_host_below(child, commitCtx);
+        }
+    }
+    if (!host) {
+        snprintf(detail, sizeof detail, "ctx=0x%x nctx=%u found=0", commitCtx, nctx);
+        caller("srv", "host_chain", detail);
+        return;
+    }
+    id sup = observer_object(host, "superlayer");
+    id supCtx = observer_object(sup, "context");
+    id sup2 = observer_object(sup, "superlayer");
+    snprintf(detail, sizeof detail,
+             "ctx=0x%x nctx=%u found=1 hostSubs=%u super=%.24s supCtx=0x%x supDisplay=0x%x sup2=%.24s",
+             commitCtx, nctx, observer_u32(observer_object(host, "sublayers"), "count", 0),
+             sup ? object_getClassName(sup) : "nil",
+             observer_u32(supCtx, "contextId", UINT32_MAX),
+             observer_u32(supCtx, "displayId", UINT32_MAX),
+             sup2 ? object_getClassName(sup2) : "nil");
+    caller("srv", "host_chain", detail);
+}
     ((void (*)(id, SEL, id)) gServerLayerDidCommit)(self, selector, layer);
     if (gServerLayerCommitEvents >= 256) return;
     ++gServerLayerCommitEvents;
@@ -557,6 +632,7 @@ static void trace_server_layer_commit(id self, SEL selector, id layer)
              rootContents ? object_getClassName(rootContents) : "-",
              getpid(), getprogname() ? getprogname() : "?");
     caller("srv", "event_layer_commit", detail);
+    if (depth == 0 && contextId != UINT32_MAX) h726_scan_host_chain(contextId);
 }
 
 static void trace_server_display_surface(id self, SEL selector,
